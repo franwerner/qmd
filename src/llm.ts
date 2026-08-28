@@ -593,6 +593,27 @@ export interface LLM {
   dispose(): Promise<void>;
 }
 
+/**
+ * What the store actually needs from a backend: the `LLM` contract plus
+ * `embedBatch`, which the session manager calls and `LLM` never declared.
+ * Anything satisfying this shape can back a store — local models or an API.
+ */
+export type LLMBackend = LLM & {
+  embedBatch(texts: string[], options?: EmbedOptions): Promise<(EmbeddingResult | null)[]>;
+  readonly embedModelName: string;
+  readonly generateModelName: string;
+  readonly rerankModelName: string;
+  tokenize(text: string): Promise<readonly number[]>;
+  detokenize(tokens: readonly number[]): Promise<string>;
+  getDeviceInfo(options?: { allowBuild?: boolean }): Promise<{
+    gpu: string | false;
+    gpuOffloading: boolean;
+    gpuDevices: string[];
+    vram?: { total: number; used: number; free: number };
+    cpuCores: number;
+  }>;
+};
+
 // =============================================================================
 // node-llama-cpp Implementation
 // =============================================================================
@@ -1898,11 +1919,11 @@ export class LlamaCpp implements LLM {
  * Coordinates with LlamaCpp idle timeout to prevent disposal during active sessions.
  */
 class LLMSessionManager {
-  private llm: LlamaCpp;
+  private llm: LLMBackend;
   private _activeSessionCount = 0;
   private _inFlightOperations = 0;
 
-  constructor(llm: LlamaCpp) {
+  constructor(llm: LLMBackend) {
     this.llm = llm;
   }
 
@@ -1938,7 +1959,7 @@ class LLMSessionManager {
     this._inFlightOperations = Math.max(0, this._inFlightOperations - 1);
   }
 
-  getLlamaCpp(): LlamaCpp {
+  getLlamaCpp(): LLMBackend {
     return this.llm;
   }
 }
@@ -2111,7 +2132,7 @@ export async function withLLMSession<T>(
  * Unlike withLLMSession, this does not use the global singleton.
  */
 export async function withLLMSessionForLlm<T>(
-  llm: LlamaCpp,
+  llm: LLMBackend,
   fn: (session: ILLMSession) => Promise<T>,
   options?: LLMSessionOptions
 ): Promise<T> {
@@ -2198,18 +2219,35 @@ export function isDarwinExitGuardInstalled(): boolean {
 // Singleton for default LlamaCpp instance
 // =============================================================================
 
-let defaultLlamaCpp: LlamaCpp | null = null;
+let defaultLlamaCpp: LLMBackend | null = null;
 
 /**
  * Get the default LlamaCpp instance (creates one if needed). The LlamaCpp
  * constructor installs the darwin exit guard, so any code path that obtains
  * the singleton is protected.
  */
-export function getDefaultLlamaCpp(): LlamaCpp {
+export function getDefaultLlamaCpp(): LLMBackend {
   if (!defaultLlamaCpp) {
-    defaultLlamaCpp = new LlamaCpp();
+    // The store builds its own backend, but several commands reach for this
+    // singleton instead. Both paths have to honour the same configuration or
+    // an API-backed store still tries to download a GGUF on `embed`.
+    defaultLlamaCpp = createDefaultBackend();
   }
   return defaultLlamaCpp;
+}
+
+/**
+ * Injected by index.ts so this module stays free of a dependency on the API
+ * backend — llm.ts is imported by the backend itself.
+ */
+let backendFactory: (() => LLMBackend) | null = null;
+
+export function setBackendFactory(factory: (() => LLMBackend) | null): void {
+  backendFactory = factory;
+}
+
+function createDefaultBackend(): LLMBackend {
+  return backendFactory ? backendFactory() : new LlamaCpp();
 }
 
 /**
@@ -2218,7 +2256,7 @@ export function getDefaultLlamaCpp(): LlamaCpp {
  * the invariant intact for test doubles that didn't go through the real
  * constructor.
  */
-export function setDefaultLlamaCpp(llm: LlamaCpp | null): void {
+export function setDefaultLlamaCpp(llm: LLMBackend | null): void {
   if (llm !== null) installDarwinExitGuard();
   defaultLlamaCpp = llm;
 }

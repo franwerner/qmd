@@ -56,6 +56,7 @@ import {
   deactivateDocument,
   getActiveDocumentPaths,
   cleanupOrphanedContent,
+  cleanupOrphanedVectors,
   countOrphanedVectors,
   previewCleanup,
   runCleanup,
@@ -86,7 +87,8 @@ import {
   type ReindexResult,
   type ChunkStrategy,
 } from "../store.js";
-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
+import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, type LLMBackend } from "../llm.js";
+import { OpenAICompatible, isOpenAIBackendConfigured } from "../llm-openai.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -159,11 +161,20 @@ function getStore(): ReturnType<typeof createStore> {
       // Untrusted project-local custom model URIs must not be loaded; status
       // still displays the YAML values via resolveModelsForCli (#889).
       const modelsForLlm = localConfigIsFullyTrusted() ? activeModels : resolveModels();
-      const llm = new LlamaCpp({
-        embedModel: modelsForLlm.embed,
-        generateModel: modelsForLlm.generate,
-        rerankModel: modelsForLlm.rerank,
-      });
+      // Third place a backend gets built (store, singleton, here). All three
+      // have to honour the same switch or a command reaches the one that still
+      // wants a GGUF on disk.
+      const llm: LLMBackend = isOpenAIBackendConfigured()
+        ? new OpenAICompatible({
+            embedModel: modelsForLlm.embed,
+            generateModel: modelsForLlm.generate,
+            rerankModel: modelsForLlm.rerank,
+          })
+        : new LlamaCpp({
+            embedModel: modelsForLlm.embed,
+            generateModel: modelsForLlm.generate,
+            rerankModel: modelsForLlm.rerank,
+          });
       setDefaultLlamaCpp(llm);
       store.llm = llm;
     } catch {
@@ -215,6 +226,17 @@ function mcpDaemonPaths(): { cacheDir: string; pidPath: string; logPath: string 
     pidPath: resolve(cacheDir, pidFile),
     logPath: resolve(cacheDir, logFile),
   };
+}
+
+/** Reads a published port file, or null when it is missing or unusable. */
+function readPortFile(path: string): number | null {
+  try {
+    if (!existsSync(path)) return null;
+    const written = parseInt(readFileSync(path, "utf-8").trim(), 10);
+    return Number.isInteger(written) && written > 0 && written < 65536 ? written : null;
+  } catch {
+    return null;
+  }
 }
 
 function setIndexName(name: string | null): void {
@@ -2157,6 +2179,83 @@ function resolveModelsForRuntime(): { embed: string; generate: string; rerank: s
   return resolveModels();
 }
 
+/**
+ * Starts the collection watcher when `--watch` is passed.
+ *
+ * Lives alongside the server rather than as its own command because a stale
+ * index is only a problem while something is serving queries off it — and a
+ * watcher nobody started is indistinguishable from one that found no changes.
+ */
+async function maybeStartWatcher(enabled: unknown, debounceRaw: unknown): Promise<void> {
+  if (!enabled) return;
+  const debounceMs =
+    typeof debounceRaw === "string" && /^\d+$/.test(debounceRaw) ? parseInt(debounceRaw, 10) : undefined;
+  const { startWatcher } = await import("../watcher.js");
+  const storeInstance = getStore();
+
+  // The watcher is handed the three operations it needs, built from the same
+  // functions this CLI already uses. It never sees a store type, so it cannot
+  // drift when the internal and public shapes differ — which is exactly what
+  // broke the first wiring here.
+  const watcher = await startWatcher({
+    listCollections: async () =>
+      listCollections(storeInstance.db).map((c) => ({ name: c.name, pwd: c.pwd })),
+    update: async ({ collections }) => {
+      const cols = listCollections(storeInstance.db).filter((c) => collections.includes(c.name));
+      let indexed = 0;
+      let updated = 0;
+      let removed = 0;
+      for (const col of cols) {
+        // The exclusions live in the YAML, not in the DB row — the row carries
+        // only the path and the glob. Reindexing without them puts every
+        // excluded file back a few seconds after any change in the collection,
+        // which quietly undoes an exclusion the user set on purpose.
+        const yamlCol = getCollectionFromYaml(col.name);
+        const r = await reindexCollection(storeInstance, col.pwd, col.glob_pattern, col.name, {
+          ignorePatterns: yamlCol?.ignore,
+        });
+        indexed += r.indexed;
+        updated += r.updated;
+        removed += r.removed;
+      }
+      return { indexed, updated, removed };
+    },
+    embed: async ({ collection }) => {
+      const r = await generateEmbeddings(storeInstance, { collection });
+      return { chunksEmbedded: r.chunksEmbedded, errors: r.errors };
+    },
+    // Only the strays, not the full `qmd cleanup`: that one also drops the LLM
+    // cache and vacuums the whole database, which is far too much to pay on
+    // every file save. Reclaiming the pages for reuse is what bounds the growth;
+    // shrinking the file stays a manual, deliberate operation.
+    cleanup: async () => cleanupOrphanedVectors(storeInstance.db),
+  }, {
+    debounceMs,
+    onIndexed: (info) => {
+      // A pure deletion indexes and embeds nothing, so without `removed` here
+      // a record leaving the index left no trace at all.
+      if (info.indexed || info.updated || info.removed || info.chunksEmbedded || info.orphansCleaned) {
+        console.error(
+          `[watch] ${info.collection}: ${info.indexed} new, ${info.updated} updated` +
+            (info.removed ? `, ${info.removed} removed` : "") +
+            `, ${info.chunksEmbedded} chunks embedded` +
+            (info.orphansCleaned ? `, ${info.orphansCleaned} orphan vectors dropped` : "") +
+            (info.errors ? `, ${info.errors} failed` : ""),
+        );
+      }
+    },
+    onError: (collection, error) => {
+      console.error(`[watch] ${collection}: ${error.message}`);
+    },
+  });
+  console.error(
+    watcher.collections.length
+      ? `[watch] watching ${watcher.collections.length} collection(s): ${watcher.collections.join(", ")}`
+      : "[watch] no collections to watch",
+  );
+  process.on("exit", () => watcher.close());
+}
+
 async function vectorIndex(
   model: string = resolveEmbedModelForCli(),
   force: boolean = false,
@@ -3071,6 +3170,8 @@ function parseCLI() {
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
+      watch: { type: "boolean" },
+      "watch-debounce-ms": { type: "string" },
       port: { type: "string" },
       host: { type: "string" },
     },
@@ -4762,7 +4863,21 @@ if (isMain) {
       }
 
       if (cli.values.http) {
-        const port = Number(cli.values.port) || 8181;
+        // Port 0 lets the OS pick a free one: a fixed default collides the moment
+        // a second project (or a leftover daemon) already holds it, and the
+        // failure surfaces as a port-in-use error rather than as anything
+        // meaningful. The chosen port is published to `portPath` so whoever
+        // registers the MCP can read it instead of assuming.
+        const port = cli.values.port !== undefined ? Number(cli.values.port) : 0;
+        const portPath = pidPath.replace(/\.pid$/, "") + ".port";
+        // Where this daemon last lived. `portPath` says "a daemon is serving
+        // here right now" and goes away on exit; this one outlives the process
+        // so a restart can return to the same port. Without it the port moves
+        // on every restart and whoever registered the previous one fails with
+        // ECONNREFUSED — which, from the agent's side, is indistinguishable
+        // from the search never having been configured.
+        const lastPortPath = portPath + ".last";
+        const explicitPort = cli.values.port !== undefined;
         // --host overrides the default localhost bind; QMD_HOST env is the
         // fallback (resolved in startMcpHttpServer). Use "0.0.0.0" to accept
         // off-host connections, e.g. a container liveness probe.
@@ -4781,13 +4896,28 @@ if (isMain) {
           }
 
           mkdirSync(cacheDir, { recursive: true });
+          // A daemon killed outright leaves its live port file behind. Clearing
+          // it here is what makes the poll below read the port this child
+          // published, rather than a leftover pointing at nothing.
+          try { unlinkSync(portPath); } catch { /* ignore */ }
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const selfPath = fileURLToPath(import.meta.url);
           const indexArgs = cli.values.index ? ["--index", String(cli.values.index)] : [];
           const hostArgs = host ? ["--host", host] : [];
+          // The daemon's child is the one that actually serves and watches, so
+          // every flag that changes its behaviour has to travel with it.
+          const portArgs = port ? ["--port", String(port)] : [];
+          const watchArgs = cli.values.watch
+            ? [
+                "--watch",
+                ...(cli.values["watch-debounce-ms"]
+                  ? ["--watch-debounce-ms", String(cli.values["watch-debounce-ms"])]
+                  : []),
+              ]
+            : [];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, ...indexArgs, "mcp", "--http", "--port", String(port), ...hostArgs]
-            : [selfPath, ...indexArgs, "mcp", "--http", "--port", String(port), ...hostArgs];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, ...indexArgs, "mcp", "--http", ...portArgs, ...hostArgs, ...watchArgs]
+            : [selfPath, ...indexArgs, "mcp", "--http", ...portArgs, ...hostArgs, ...watchArgs];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -4802,7 +4932,22 @@ if (isMain) {
           closeSync(logFd); // parent's copy; child inherited the fd
 
           writeFileSync(pidPath, String(child.pid));
-          console.log(`Started on http://${host ?? "localhost"}:${port}/mcp (PID ${child.pid})`);
+          // The child owns the port when the OS assigns it, so read it back
+          // instead of echoing what we asked for.
+          let actualPort = port;
+          if (port === 0) {
+            for (let i = 0; i < 100; i++) {
+              const written = readPortFile(portPath);
+              if (written) { actualPort = written; break; }
+              await new Promise((r) => setTimeout(r, 100));
+            }
+          }
+          if (actualPort === 0) {
+            console.error("Started, but the port was never published — check the log.");
+            console.error(`Logs: ${logPath}`);
+            process.exit(1);
+          }
+          console.log(`Started on http://${host ?? "localhost"}:${actualPort}/mcp (PID ${child.pid})`);
           console.log(`Logs: ${logPath}`);
           process.exit(0);
         }
@@ -4821,18 +4966,46 @@ if (isMain) {
           } catch { /* ignore */ }
         };
         process.on("exit", unlinkOwnPidfile);
+        await maybeStartWatcher(cli.values.watch, cli.values["watch-debounce-ms"]);
         const { startMcpHttpServer } = await import("../mcp/server.js");
+        // Prefer the port this daemon last held, so a restart lands back where
+        // whoever registered it is still pointing. An explicit --port is the
+        // user's choice and overrides the memory.
+        const preferredPort = explicitPort ? port : (readPortFile(lastPortPath) ?? 0);
         try {
-          await startMcpHttpServer(port, { dbPath: getDbPath(), host });
+          let handle: { port: number };
+          try {
+            handle = await startMcpHttpServer(preferredPort, { dbPath: getDbPath(), host });
+          } catch (e: unknown) {
+            const inUse = typeof e === "object" && e !== null && "code" in e && e.code === "EADDRINUSE";
+            // Only the remembered port yields: someone else took it since last
+            // time, and refusing to start over a preference nobody expressed
+            // would be worse than moving. An explicit --port does not yield —
+            // the user asked for that one, and swallowing the collision would
+            // hide a second daemon on the same index.
+            if (!inUse || explicitPort) throw e;
+            handle = await startMcpHttpServer(0, { dbPath: getDbPath(), host });
+          }
+          // Publish the port the OS actually gave us. Without this, a daemon on
+          // an ephemeral port is unreachable: nobody can guess where it landed.
+          try {
+            writeFileSync(portPath, String(handle.port));
+            writeFileSync(lastPortPath, String(handle.port));
+            process.on("exit", () => {
+              // Only the live marker goes; the memory is what survives a restart.
+              try { unlinkSync(portPath); } catch { /* ignore */ }
+            });
+          } catch { /* serving still works; only discovery degrades */ }
         } catch (e: unknown) {
           if (typeof e === "object" && e !== null && "code" in e && e.code === "EADDRINUSE") {
-            console.error(`Port ${port} already in use. Try a different port with --port.`);
+            console.error(`Port ${preferredPort} already in use. Try a different port with --port.`);
             process.exit(1);
           }
           throw e;
         }
       } else {
         // Default: stdio transport
+        await maybeStartWatcher(cli.values.watch, cli.values["watch-debounce-ms"]);
         const { startMcpServer } = await import("../mcp/server.js");
         await startMcpServer({ dbPath: getDbPath() });
       }

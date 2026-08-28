@@ -12,6 +12,10 @@ texts/
 !README.md
 !CLAUDE.md
 !CHANGELOG.md
+# matecito-ai: this copy's own provenance and porting notes. The blanket *.md
+# above is upstream's; without this line the one document explaining what this
+# fork changed would be the only file left out of it.
+!MATECITO.md
 !skills/**/*.md
 !finetune/*.md
 !docs/*.md

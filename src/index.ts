@@ -67,7 +67,17 @@ import {
 } from "./store.js";
 import {
   LlamaCpp,
+  type LLMBackend,
 } from "./llm.js";
+import { OpenAICompatible, isOpenAIBackendConfigured } from "./llm-openai.js";
+import { setBackendFactory } from "./llm.js";
+
+// Commands that reach for the default backend instead of the store's own
+// must land on the same implementation, or an API-backed setup still tries
+// to download local models.
+if (isOpenAIBackendConfigured()) {
+  setBackendFactory(() => new OpenAICompatible());
+}
 import {
   setConfigSource,
   loadConfig,
@@ -381,13 +391,23 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
 
   // Create a per-store LlamaCpp instance — lazy-loads models on first use,
   // auto-unloads after 5 min inactivity to free VRAM.
-  const llm = new LlamaCpp({
-    embedModel: config?.models?.embed,
-    generateModel: config?.models?.generate,
-    rerankModel: config?.models?.rerank,
-    inactivityTimeoutMs: 5 * 60 * 1000,
-    disposeModelsOnInactivity: true,
-  });
+  // An API backend when one is configured, local models otherwise. Loading a
+  // GGUF costs minutes per cold query on modest hardware and holds gigabytes of
+  // RAM between searches; over HTTP the same work answers in under a second and
+  // holds nothing.
+  const llm: LLMBackend = isOpenAIBackendConfigured()
+    ? new OpenAICompatible({
+        embedModel: config?.models?.embed,
+        generateModel: config?.models?.generate,
+        rerankModel: config?.models?.rerank,
+      })
+    : new LlamaCpp({
+        embedModel: config?.models?.embed,
+        generateModel: config?.models?.generate,
+        rerankModel: config?.models?.rerank,
+        inactivityTimeoutMs: 5 * 60 * 1000,
+        disposeModelsOnInactivity: true,
+      });
   internal.llm = llm;
 
   const store: QMDStore = {
