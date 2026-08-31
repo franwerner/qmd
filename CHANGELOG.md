@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.1] - 2026-08-31
+
 This fork now has a release path of its own. It publishes to no registry:
 a `v*` tag builds, tests, and creates a GitHub release, and you install from
 that tag with `npm install -g github:franwerner/qmd#v2.8.3-mate.1`.
