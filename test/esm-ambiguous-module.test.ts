@@ -41,8 +41,9 @@ describe("Node ESM entrypoints", () => {
       stdio: "pipe",
     }).trim();
 
-    // `qmd 2.6.3` or `qmd 2.6.3 (abc1234)` / `(abc1234-dirty)` — never anything else.
-    expect(output).toMatch(/^qmd \d+\.\d+\.\d+(?: \([0-9a-f]{7,}(?:-dirty)?\))?$/);
+    // `qmd 2.6.3` or `qmd 2.6.3 (abc1234)` / `(abc1234-dirty)` — never anything
+    // else. Fork releases carry a `-mate.N` suffix (see skills/release/SKILL.md).
+    expect(output).toMatch(/^qmd \d+\.\d+\.\d+(?:-mate\.\d+)?(?: \([0-9a-f]{7,}(?:-dirty)?\))?$/);
 
     // In a checkout, git is available and the stamp must be this repo's HEAD.
     const head = execFileSync("git", ["rev-parse", "--short", "HEAD"], {

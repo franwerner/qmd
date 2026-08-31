@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow no longer fails on the fork's own version shape. The
+  `--version` banner assertion only accepted `MAJOR.MINOR.PATCH`, so every
+  `-mate.N` build failed the test step and no release was ever created.
+
 ## [2.8.3-mate.2] - 2026-08-31
 
 ### Fixed
