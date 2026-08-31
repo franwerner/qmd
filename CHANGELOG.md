@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.3] - 2026-08-31
+
 ### Fixed
 
 - The release workflow no longer fails on the fork's own version shape. The
