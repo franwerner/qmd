@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.5] - 2026-08-31
+
 ### Fixed
 
 - A search whose embedding provider could not be reached no longer reports as a
