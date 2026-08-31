@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.4] - 2026-08-31
+
 ### Fixed
 
 - Installing this fork works again. Every release now carries a packed tarball
