@@ -17,6 +17,7 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const scriptSrc = join(repoRoot, "skills", "release", "scripts", "release-context.sh");
 const installHooksSrc = join(repoRoot, "skills", "release", "scripts", "install-hooks.sh");
 const prePushSrc = join(repoRoot, "scripts", "pre-push");
+const forkVersionSrc = join(repoRoot, "scripts", "fork-version.sh");
 const skillSrc = join(repoRoot, "skills", "release", "SKILL.md");
 
 const fixtures: string[] = [];
@@ -56,6 +57,7 @@ function makeReleaseFixture(opts?: { dirty?: boolean }) {
   writeFileSync(join(root, "skills", "release", "scripts", "release-context.sh"), readFileSync(scriptSrc));
   writeFileSync(join(root, "skills", "release", "scripts", "install-hooks.sh"), readFileSync(installHooksSrc));
   writeFileSync(join(root, "scripts", "pre-push"), readFileSync(prePushSrc));
+  writeFileSync(join(root, "scripts", "fork-version.sh"), readFileSync(forkVersionSrc));
   chmodSync(join(root, "skills", "release", "scripts", "release-context.sh"), 0o755);
   chmodSync(join(root, "skills", "release", "scripts", "install-hooks.sh"), 0o755);
   chmodSync(join(root, "scripts", "pre-push"), 0o755);
@@ -102,11 +104,10 @@ function makeReleaseFixture(opts?: { dirty?: boolean }) {
   return root;
 }
 
-function runContext(cwd: string, versionArg: string) {
-  return spawnSync("bash", [join(cwd, "skills", "release", "scripts", "release-context.sh"), versionArg], {
-    cwd,
-    encoding: "utf8",
-  });
+function runContext(cwd: string, versionArg?: string) {
+  const args = [join(cwd, "skills", "release", "scripts", "release-context.sh")];
+  if (versionArg !== undefined) args.push(versionArg);
+  return spawnSync("bash", args, { cwd, encoding: "utf8" });
 }
 
 describe("skills/release/scripts/release-context.sh (#796)", () => {
@@ -123,24 +124,30 @@ describe("skills/release/scripts/release-context.sh (#796)", () => {
     expect(nums).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
   });
 
-  test("fails without a version argument", () => {
+  test("rejects the bump keywords, which would move the upstream base", () => {
     const root = makeReleaseFixture();
-    const result = spawnSync("bash", [join(root, "skills", "release", "scripts", "release-context.sh")], {
-      cwd: root,
-      encoding: "utf8",
-    });
+    for (const keyword of ["patch", "minor", "major"]) {
+      const result = runContext(root, keyword);
+      expect(result.status, `${keyword} should be rejected`).not.toBe(0);
+      expect(result.stderr).toMatch(/is not a valid version for this fork/);
+    }
+  });
+
+  test("rejects an explicit version that is not a fork version", () => {
+    const root = makeReleaseFixture();
+    const result = runContext(root, "2.6.4");
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/Usage: release-context\.sh/);
+    expect(result.stderr).toMatch(/is not a fork version/);
   });
 
   test("prints version, status, commits, files, unreleased, and previous entry", () => {
     const root = makeReleaseFixture();
-    const result = runContext(root, "patch");
+    const result = runContext(root);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toMatch(/=== Version ===/);
     expect(result.stdout).toMatch(/Current:\s+2\.6\.3/);
-    expect(result.stdout).toMatch(/Requested:\s+patch/);
-    expect(result.stdout).toMatch(/Next:\s+2\.6\.4/);
+    expect(result.stdout).toMatch(/Requested:\s+\(auto\)/);
+    expect(result.stdout).toMatch(/Next:\s+2\.6\.3-mate\.1/);
     expect(result.stdout).toMatch(/Last tag:\s+v2\.6\.3/);
     expect(result.stdout).toMatch(/=== Working tree ===/);
     expect(result.stdout).toMatch(/\(clean\)/);
@@ -159,7 +166,7 @@ describe("skills/release/scripts/release-context.sh (#796)", () => {
     const root = makeReleaseFixture();
     const hook = join(root, ".git", "hooks", "pre-push");
     expect(existsSync(hook)).toBe(false);
-    const result = runContext(root, "2.6.4");
+    const result = runContext(root, "2.6.3-mate.1");
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).not.toMatch(/pre-push hook/);
     expect(result.stdout).not.toMatch(/^Done\.$/m);
@@ -168,9 +175,9 @@ describe("skills/release/scripts/release-context.sh (#796)", () => {
 
   test("shows a dirty working tree", () => {
     const root = makeReleaseFixture({ dirty: true });
-    const result = runContext(root, "minor");
+    const result = runContext(root);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toMatch(/Next:\s+2\.7\.0/);
+    expect(result.stdout).toMatch(/Next:\s+2\.6\.3-mate\.1/);
     expect(result.stdout).toMatch(/dirty\.txt/);
     expect(result.stdout).not.toMatch(/\(clean\)/);
   });

@@ -1,6 +1,6 @@
 ---
 name: release
-description: Manage releases for this project. Validates changelog, installs git hooks, and cuts releases. Use when user says "/release", "release 1.0.5", "cut a release", or asks about the release process. NOT auto-invoked by the model.
+description: Manage releases for this project. Validates changelog, installs git hooks, and cuts releases. Use when user says "/release", "cut a release", or asks about the release process. NOT auto-invoked by the model.
 disable-model-invocation: true
 ---
 
@@ -8,15 +8,34 @@ disable-model-invocation: true
 
 Cut a release, validate the changelog, and ensure git hooks are installed.
 
+## Versions in this fork
+
+This is a fork of upstream `tobi/qmd` and publishes to **no registry**. A
+release is a git tag plus the GitHub release the `v*` tag triggers; people
+install it with `npm install -g github:franwerner/qmd#<tag>`.
+
+Versions are `<upstream-base>-mate.N`:
+
+- The base (`X.Y.Z`) is whatever upstream release this fork sits on. It is not
+  ours to bump — it moves only when a rebase brings in a new upstream version,
+  and `patch`/`minor`/`major` are rejected for exactly that reason.
+- The counter increments per fork release and **resets to `.1` whenever the base
+  changes**, which falls out of reading the base from `package.json`: a bare
+  `2.9.0` left there by a rebase yields `2.9.0-mate.1`.
+- When resolving the `package.json` version conflict during such a rebase, take
+  upstream's bare version.
+
 ## Usage
 
-`/release 1.0.5` or `/release patch` (bumps patch from current version).
+`/release` — takes the next fork version automatically. `/release 2.9.0-mate.1`
+to name one explicitly.
 
 ## Process
 
-When the user triggers `/release <version>`:
+When the user triggers `/release`:
 
-1. **Gather context** — run `skills/release/scripts/release-context.sh <version>`.
+1. **Gather context** — run `skills/release/scripts/release-context.sh` (with the
+   explicit version, if one was given).
    This silently installs git hooks and prints everything needed: version info,
    working directory status, commits since last release, files changed, current
    `[Unreleased]` content, and the previous release entry for style reference.
@@ -35,20 +54,21 @@ When the user triggers `/release <version>`:
    updates for these packages. If updates exist, bump them (pinned, no
    `^` ranges) and re-run tests before proceeding.
 
-5. **Cut the release** — run `scripts/release.sh <version>`. This renames
+5. **Cut the release** — run `scripts/release.sh` (or `scripts/release.sh
+   <version>` for an explicit one). This renames
    `[Unreleased]` → `[X.Y.Z] - date`, inserts a fresh `[Unreleased]`,
    bumps `package.json` and the plugin version in
    `.claude-plugin/marketplace.json` (so installed plugins see the update),
    commits, and tags.
 
 6. **Show the final changelog** — print the full `[Unreleased]` +
-   minor series rollup via `scripts/extract-changelog.sh <version>`.
+   fork series rollup via `scripts/extract-changelog.sh <version>`.
    Ask the user to confirm before pushing.
 
 7. **Push** — after explicit confirmation, run `git push origin main --tags`.
 
 8. **Watch CI** — after the push, start a background dispatch to watch the
-   publish workflow. Use `interactive_shell` in dispatch mode with:
+   release workflow. Use `interactive_shell` in dispatch mode with:
    ```
    gh run watch $(gh run list --workflow=publish.yml --limit=1 --json databaseId --jq '.[0].databaseId') --exit-status
    ```
@@ -124,9 +144,17 @@ through parallel contexts. GPU auto-detection replaces the unreliable
 
 ## GitHub Release Notes
 
-Each GitHub release includes the full changelog for the **minor series** back
-to x.x.0. The `scripts/extract-changelog.sh` script handles this, and the
-publish workflow (`publish.yml`) calls it to populate the GitHub release.
+Each GitHub release includes the full changelog for this fork's run on the
+current upstream base — `2.8.3-mate.1` through `2.8.3-mate.N` — and **not**
+upstream's own `[2.8.3]` entry. Since the counter resets with every new base,
+the notes describe exactly what this fork added on top of the base it ships.
+`scripts/extract-changelog.sh` handles this, and the release workflow
+(`publish.yml`) calls it to populate the GitHub release.
+
+Releases are created with `--latest`. Every fork version carries a `-mate.N`
+suffix, which GitHub reads as a semver prerelease; without the flag the
+repository would permanently show no latest release, which is the one thing
+people are pointed at to install.
 
 ## Git Hooks
 

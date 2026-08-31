@@ -28,14 +28,8 @@ You can read more about QMD's progress in the [CHANGELOG](CHANGELOG.md).
 ## Quick Start
 
 ```sh
-# Install globally (Node or Bun)
-npm install -g @tobilu/qmd
-# or
-bun install -g @tobilu/qmd
-
-# Or run directly
-npx @tobilu/qmd ...
-bunx @tobilu/qmd ...
+# Install globally from a release tag (this fork is not on npm)
+npm install -g github:franwerner/qmd#v2.8.3-mate.1
 
 # Create collections for your notes, docs, and meeting transcripts
 qmd collection add ~/notes --name notes
@@ -587,19 +581,26 @@ Supported model families:
 
 ## Installation
 
+This fork is not published to npm. Install it from a release tag:
+
 ```sh
-npm install -g @tobilu/qmd
-# or
-bun install -g @tobilu/qmd
+npm install -g github:franwerner/qmd#v2.8.3-mate.1
 ```
+
+Leaving the tag off tracks `main` instead. Either way npm builds `dist/` during
+the install via the `prepare` script, so the first install compiles the native
+dependencies and takes a few minutes.
+
+Upstream's registry builds (`npm install -g @tobilu/qmd`) are a different
+package and do not carry this fork's changes.
 
 ### Development
 
 ```sh
-git clone https://github.com/tobi/qmd
+git clone https://github.com/franwerner/qmd
 cd qmd
-npm install
-npm link
+bun install
+bun link
 ```
 
 ## Usage

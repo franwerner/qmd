@@ -6,9 +6,9 @@ set -euo pipefail
 # commits and files since the last release tag, the current [Unreleased]
 # changelog block, and the previous release entry for style reference.
 #
-# Usage: skills/release/scripts/release-context.sh [patch|minor|major|<version>]
+# Usage: skills/release/scripts/release-context.sh [<version>]
 
-VERSION_ARG="${1:?Usage: release-context.sh [patch|minor|major|<version>]}"
+VERSION_ARG="${1:-}"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -24,16 +24,16 @@ if [[ -x "$SCRIPT_DIR/install-hooks.sh" ]]; then
   "$SCRIPT_DIR/install-hooks.sh" >/dev/null
 fi
 
-bump_version() {
-  local current="$1" type="$2"
-  IFS='.' read -r major minor patch <<< "$current"
-  case "$type" in
-    major) echo "$((major + 1)).0.0" ;;
-    minor) echo "$major.$((minor + 1)).0" ;;
-    patch) echo "$major.$minor.$((patch + 1))" ;;
-    *)     echo "$type" ;;
-  esac
-}
+source "$REPO_ROOT/scripts/fork-version.sh"
+
+if [[ -n "$VERSION_ARG" ]] && reject_bump_keyword "$VERSION_ARG"; then
+  exit 1
+fi
+
+if [[ -n "$VERSION_ARG" ]] && ! is_fork_version "$VERSION_ARG"; then
+  echo "Error: '$VERSION_ARG' is not a fork version (expected <major>.<minor>.<patch>-$FORK_SUFFIX.<n>)" >&2
+  exit 1
+fi
 
 if [[ ! -f package.json ]]; then
   echo "Error: package.json not found in $REPO_ROOT" >&2
@@ -41,13 +41,19 @@ if [[ ! -f package.json ]]; then
 fi
 
 CURRENT=$(jq -r .version package.json)
-NEXT=$(bump_version "$CURRENT" "$VERSION_ARG")
+if [[ -n "$VERSION_ARG" ]]; then
+  NEXT="$VERSION_ARG"
+elif ! NEXT=$(next_fork_version "$CURRENT"); then
+  echo "Error: package.json version '$CURRENT' is neither an upstream base (X.Y.Z)" >&2
+  echo "nor a fork version (X.Y.Z-$FORK_SUFFIX.N), so the next one cannot be computed." >&2
+  exit 1
+fi
 BRANCH=$(git branch --show-current)
 LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
 
 echo "=== Version ==="
 echo "Current:   $CURRENT"
-echo "Requested: $VERSION_ARG"
+echo "Requested: ${VERSION_ARG:-"(auto)"}"
 echo "Next:      $NEXT"
 echo "Branch:    ${BRANCH:-"(detached)"}"
 if [[ -n "$LAST_TAG" ]]; then

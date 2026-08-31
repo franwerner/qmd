@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# QMD Release Script
+# QMD Release Script (fork)
 #
 # Renames the [Unreleased] section in CHANGELOG.md to the new version,
-# bumps package.json, commits, and creates a tag. The actual publish
-# happens via GitHub Actions when the tag is pushed.
+# bumps package.json, commits, and creates a tag. Pushing the tag creates
+# the GitHub release; this fork publishes to no registry.
 #
-# Usage: ./scripts/release.sh [patch|minor|major|<version>]
+# Usage: ./scripts/release.sh [<version>]
 # Examples:
-#   ./scripts/release.sh patch     # 0.9.0 -> 0.9.1
-#   ./scripts/release.sh minor     # 0.9.0 -> 0.10.0
-#   ./scripts/release.sh major     # 0.9.0 -> 1.0.0
-#   ./scripts/release.sh 1.0.0     # explicit version
+#   ./scripts/release.sh                # 2.8.3 -> 2.8.3-mate.1
+#   ./scripts/release.sh                # 2.8.3-mate.1 -> 2.8.3-mate.2
+#   ./scripts/release.sh 2.9.0-mate.1   # explicit fork version
 
-BUMP="${1:?Usage: release.sh [patch|minor|major|<version>]}"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$SCRIPT_DIR/fork-version.sh"
+
+REQUESTED="${1:-}"
+
+if [[ -n "$REQUESTED" ]] && reject_bump_keyword "$REQUESTED"; then
+  exit 1
+fi
+
+if [[ -n "$REQUESTED" ]] && ! is_fork_version "$REQUESTED"; then
+  echo "Error: '$REQUESTED' is not a fork version (expected <major>.<minor>.<patch>-$FORK_SUFFIX.<n>)" >&2
+  exit 1
+fi
 
 # Ensure we're on main and clean
 BRANCH=$(git branch --show-current)
@@ -42,21 +53,22 @@ CURRENT=$(jq -r .version package.json)
 echo "Current version: $CURRENT"
 
 # Calculate new version
-bump_version() {
-  local current="$1" type="$2"
-  IFS='.' read -r major minor patch <<< "$current"
-  case "$type" in
-    major) echo "$((major + 1)).0.0" ;;
-    minor) echo "$major.$((minor + 1)).0" ;;
-    patch) echo "$major.$minor.$((patch + 1))" ;;
-    *)     echo "$type" ;; # explicit version
-  esac
-}
+if [[ -n "$REQUESTED" ]]; then
+  NEW="$REQUESTED"
+elif ! NEW=$(next_fork_version "$CURRENT"); then
+  echo "Error: package.json version '$CURRENT' is neither an upstream base (X.Y.Z)" >&2
+  echo "nor a fork version (X.Y.Z-$FORK_SUFFIX.N), so the next one cannot be computed." >&2
+  exit 1
+fi
 
-NEW=$(bump_version "$CURRENT" "$BUMP")
 DATE=$(date +%Y-%m-%d)
 echo "New version:     $NEW"
 echo ""
+
+if git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null; then
+  echo "Error: tag v$NEW already exists" >&2
+  exit 1
+fi
 
 # --- Validate CHANGELOG.md ---
 
@@ -126,6 +138,6 @@ git tag -a "v$NEW" -m "v$NEW"
 echo ""
 echo "Created commit and tag v$NEW"
 echo ""
-echo "Next: push to trigger the publish workflow"
+echo "Next: push to create the GitHub release (no registry publish)"
 echo ""
 echo "  git push origin main --tags"

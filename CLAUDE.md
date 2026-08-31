@@ -174,12 +174,22 @@ bun test --preload ./src/test-preload.ts test/
 
 ## Releasing
 
-Use `/release <version>` to cut a release. Full changelog standards,
-release workflow, and git hook setup are documented in the
-[release skill](skills/release/SKILL.md).
+This is a fork of [tobi/qmd](https://github.com/tobi/qmd) and publishes to no
+registry: a release is a git tag plus the GitHub release it triggers. Users
+install with `npm install -g github:franwerner/qmd#<tag>`.
+
+Use `/release` to cut one. Full changelog standards, release workflow, and git
+hook setup are documented in the [release skill](skills/release/SKILL.md).
 
 Key points:
+- Versions are `<upstream-base>-mate.N` (e.g. `2.8.3-mate.1`). The base is
+  whatever upstream version this fork sits on; the counter resets to `.1`
+  whenever a rebase brings in a new base
+- `package.json`'s `name` stays `@tobilu/qmd` — it is published nowhere, and
+  keeping it avoids a rebase conflict on every upstream merge. When resolving
+  the `version` conflict during such a rebase, take upstream's bare version
 - Add changelog entries under `## [Unreleased]` **as you make changes**
 - The release script renames `[Unreleased]` → `[X.Y.Z] - date` at release time
 - Credit external PRs with `#NNN (thanks @username)`
-- GitHub releases roll up the full minor series (e.g. 1.2.0 through 1.2.3)
+- GitHub releases roll up this fork's run on the current base (e.g.
+  `2.8.3-mate.1` through `2.8.3-mate.3`), not upstream's own entries

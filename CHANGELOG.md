@@ -2,9 +2,38 @@
 
 ## [Unreleased]
 
+This fork now has a release path of its own. It publishes to no registry:
+a `v*` tag builds, tests, and creates a GitHub release, and you install from
+that tag with `npm install -g github:franwerner/qmd#v2.8.3-mate.1`.
+
 ### Added
 
 - Added Oxlint lint fence.
+- Fork releases are versioned `<upstream-base>-mate.N` — the base is whatever
+  upstream release the fork sits on, and the counter resets to `.1` whenever a
+  rebase brings in a new base. `scripts/release.sh` takes the next version with
+  no argument; `patch`/`minor`/`major` are rejected, since moving the base is
+  upstream's business, not the fork's.
+- `README.md` documents the git-tag install; `dist/` is still built on the
+  consumer's machine by the `prepare` script.
+
+### Changed
+
+- The publish workflow no longer runs `npm publish`: the package name is
+  `@tobilu/qmd`, which this fork cannot publish under, and keeping the name
+  untouched is what avoids a merge conflict on every rebase from upstream.
+  It still builds, so a tag is never advertised as installable before the
+  build that install depends on has passed. GitHub releases are created with
+  `--latest`, which a `-mate.N` version would otherwise never be.
+
+### Fixed
+
+- `scripts/extract-changelog.sh` no longer produces the wrong release notes for
+  a fork version. Its heading matcher required a `]` right after three numeric
+  groups, so `## [2.8.3-mate.1]` fell through to the generic branch and turned
+  capture off — the release would have shipped upstream's history with none of
+  the fork's own entry. Fork releases now roll up `<base>-mate.*` and leave
+  upstream's own entry for that base out.
 
 ## [2.8.3] - 2026-08-16
 
