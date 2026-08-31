@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Installing this fork works again. Every release now carries a packed tarball
+  and that is what you install:
+
+  ```sh
+  npm install -g https://github.com/franwerner/qmd/releases/download/v2.8.3-mate.4/tobilu-qmd-2.8.3-mate.4.tgz
+  ```
+
+  The git URL this previously documented never worked: npm runs a git
+  dependency's `prepare` inside a clone that has no `node_modules`, so the
+  TypeScript build could not resolve `tsc` and the install died. Declaring
+  `typescript` in `dependencies` instead of `devDependencies` does not help —
+  at that point nothing is installed at all. A tarball install runs no
+  `prepare`, so the `dist/` inside it is used as-is; it also takes about 20
+  seconds instead of a full build.
+
 ## [2.8.3-mate.3] - 2026-08-31
 
 ### Fixed

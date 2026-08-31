@@ -28,8 +28,8 @@ You can read more about QMD's progress in the [CHANGELOG](CHANGELOG.md).
 ## Quick Start
 
 ```sh
-# Install globally from a release tag (this fork is not on npm)
-npm install -g github:franwerner/qmd#v2.8.3-mate.1
+# Install globally from a release tarball (this fork is not on npm)
+npm install -g https://github.com/franwerner/qmd/releases/download/v2.8.3-mate.4/tobilu-qmd-2.8.3-mate.4.tgz
 
 # Create collections for your notes, docs, and meeting transcripts
 qmd collection add ~/notes --name notes
@@ -581,15 +581,20 @@ Supported model families:
 
 ## Installation
 
-This fork is not published to npm. Install it from a release tag:
+This fork is not published to npm. Every release carries a packed tarball;
+install that:
 
 ```sh
-npm install -g github:franwerner/qmd#v2.8.3-mate.1
+npm install -g https://github.com/franwerner/qmd/releases/download/v2.8.3-mate.4/tobilu-qmd-2.8.3-mate.4.tgz
 ```
 
-Leaving the tag off tracks `main` instead. Either way npm builds `dist/` during
-the install via the `prepare` script, so the first install compiles the native
-dependencies and takes a few minutes.
+The tarball already contains the compiled `dist/`, so nothing of this project is
+built on your machine — only the native dependencies (`better-sqlite3`,
+`node-llama-cpp`, `sqlite-vec`) are fetched or compiled as usual.
+
+Installing from the git URL (`github:franwerner/qmd#<tag>`) does **not** work:
+npm runs a git dependency's `prepare` inside a clone that has no `node_modules`,
+so the TypeScript build cannot find `tsc` and the install fails. Use the tarball.
 
 Upstream's registry builds (`npm install -g @tobilu/qmd`) are a different
 package and do not carry this fork's changes.

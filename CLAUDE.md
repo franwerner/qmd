@@ -175,8 +175,11 @@ bun test --preload ./src/test-preload.ts test/
 ## Releasing
 
 This is a fork of [tobi/qmd](https://github.com/tobi/qmd) and publishes to no
-registry: a release is a git tag plus the GitHub release it triggers. Users
-install with `npm install -g github:franwerner/qmd#<tag>`.
+registry: a release is a git tag plus the GitHub release it triggers, which
+carries a packed tarball as its asset. Users install that tarball's URL — the
+git URL (`github:franwerner/qmd#<tag>`) does not work, because npm runs a git
+dependency's `prepare` in a clone with no `node_modules` and the build cannot
+find `tsc`.
 
 Use `/release` to cut one. Full changelog standards, release workflow, and git
 hook setup are documented in the [release skill](skills/release/SKILL.md).

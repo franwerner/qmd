@@ -1,8 +1,12 @@
 name: Release
 
-# This fork publishes to no registry: a v* tag builds, tests, and creates the
-# GitHub release people install from with
-# `npm install -g github:franwerner/qmd#<tag>`.
+# This fork publishes to no registry: a v* tag builds, tests, and creates a
+# GitHub release carrying the packed tarball people install from.
+#
+# The tarball is the install path rather than the git URL because npm runs a
+# git dependency's `prepare` in a clone that has no node_modules — the build
+# then cannot find tsc and the install dies. Installing a tarball runs no
+# prepare at all, so the built dist/ inside it is simply used as-is.
 
 on:
   push:
@@ -38,10 +42,12 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      # Not an artifact to upload — a `github:` install builds dist/ on the
-      # consumer's machine via the prepare script, so this proves that build
-      # works before the tag is advertised as installable.
-      - run: npm run build
+      # `npm pack` runs prepare, so this builds dist/ AND produces the tarball
+      # that gets attached below. A broken build still fails here, before the
+      # release exists.
+      - name: Pack the install tarball
+        id: pack
+        run: echo "tarball=$(npm pack --silent | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Extract release notes
         id: notes
@@ -59,6 +65,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --latest \
-            --notes-file /tmp/release-notes.md
+            --notes-file /tmp/release-notes.md \
+            "${{ steps.pack.outputs.tarball }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

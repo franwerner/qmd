@@ -11,8 +11,16 @@ Cut a release, validate the changelog, and ensure git hooks are installed.
 ## Versions in this fork
 
 This is a fork of upstream `tobi/qmd` and publishes to **no registry**. A
-release is a git tag plus the GitHub release the `v*` tag triggers; people
-install it with `npm install -g github:franwerner/qmd#<tag>`.
+release is a git tag plus the GitHub release the `v*` tag triggers, which
+carries the packed tarball (`npm pack`) as its asset. That tarball's URL is the
+install path.
+
+Do not document the git URL as installable. npm runs a git dependency's
+`prepare` inside a clone that has no `node_modules`, so `scripts/build.mjs`
+cannot resolve `tsc` and the install dies — declaring `typescript` in either
+`dependencies` or `devDependencies` does not help, because nothing is installed
+at that point. Installing a tarball runs no `prepare`, so the `dist/` packed
+inside it is used as-is.
 
 Versions are `<upstream-base>-mate.N`:
 
@@ -155,6 +163,10 @@ Releases are created with `--latest`. Every fork version carries a `-mate.N`
 suffix, which GitHub reads as a semver prerelease; without the flag the
 repository would permanently show no latest release, which is the one thing
 people are pointed at to install.
+
+The release also carries `tobilu-qmd-<version>.tgz`, built by `npm pack` in the
+workflow. After cutting a release, update the install URL in `README.md` — it
+names the version, so it goes stale on every cut.
 
 ## Git Hooks
 
