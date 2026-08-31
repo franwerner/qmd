@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A search whose embedding provider could not be reached no longer reports as a
+  search that found nothing. It printed `No results found.` and exited 0 — the
+  same answer as an honest miss, and `--format json` gave `[]` either way, so
+  nothing a caller could act on distinguished "there is nothing there" from
+  "nothing was searched". An expired API key read as an empty index.
+
+  Every backend operation still answers `null` when the provider is unreachable,
+  which is right mid-pipeline: one missing embedding must not abort an ingest of
+  ten thousand chunks. What changed is that the failure is now recorded as well
+  as logged, and the command at the top asks once, before reporting, whether the
+  work it is about to describe could actually be done.
+
+  - `vsearch`, `search` and `query` exit **1** when the provider never answered,
+    and say `Search did not run.` instead of `No results found.`
+  - `doctor` reports a `search provider` check and exits **1** when it failed.
+    It distinguishes three states, not two: failed, answered, or never exercised
+    by the checks — the last one claims nothing rather than reporting healthy.
+  - A search that genuinely finds nothing still exits 0, and `min_score` is
+    untouched: results existed and were filtered, so that search did run.
+
 ## [2.8.3-mate.4] - 2026-08-31
 
 ### Fixed

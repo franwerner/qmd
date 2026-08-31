@@ -88,7 +88,7 @@ import {
   type ChunkStrategy,
 } from "../store.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, type LLMBackend } from "../llm.js";
-import { OpenAICompatible, isOpenAIBackendConfigured } from "../llm-openai.js";
+import { OpenAICompatible, isOpenAIBackendConfigured, providerAttempted, providerFailure } from "../llm-openai.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -321,6 +321,23 @@ async function flushWritable(stream: CliLifecycleWritable): Promise<void> {
  * Production callers must not pass `exit`.
  */
 export async function finishSuccessfulCliCommand(options: FinishSuccessfulCliCommandOptions): Promise<void> {
+  return finishCliCommand(options, 0);
+}
+
+/**
+ * Finish a command that reported on work it could not do.
+ *
+ * Same teardown as the successful path — the output is already written and the
+ * native handles still have to come down in order — but it exits non-zero. A
+ * search whose provider never answered returns an empty result set that reads
+ * exactly like an honest miss, and the exit status is the only part of that a
+ * caller can act on without parsing prose.
+ */
+export async function finishFailedCliCommand(options: FinishSuccessfulCliCommandOptions): Promise<void> {
+  return finishCliCommand(options, 1);
+}
+
+async function finishCliCommand(options: FinishSuccessfulCliCommandOptions, code: number): Promise<void> {
   const stderr = options.stderr ?? process.stderr;
 
   await flushWritable(options.stdout ?? process.stdout);
@@ -335,11 +352,11 @@ export async function finishSuccessfulCliCommand(options: FinishSuccessfulCliCom
   await flushWritable(stderr);
 
   if (options.exit) {
-    options.exit(0);
+    options.exit(code);
     return;
   }
 
-  process.exitCode = 0;
+  process.exitCode = code;
 }
 
 // Ensure cursor is restored on exit
@@ -2453,8 +2470,34 @@ function shortPath(dirpath: string): string {
 
 type EmptySearchReason = "no_results" | "min_score";
 
-// Emit format-safe empty output for search commands.
+/**
+ * Emit format-safe empty output for search commands.
+ *
+ * An empty result set is only an answer if the search ran. When the embedding
+ * provider could not be reached, every vector query comes back with nothing and
+ * arrives here looking exactly like an honest miss — same output, same exit 0.
+ * That is the worst shape a failure can take: a caller cannot tell it from a
+ * real result, so it is believed.
+ *
+ * The check lives here, where the empty set is rendered, rather than at each of
+ * the three call sites: a site that forgot it would silently reintroduce the
+ * bug.
+ *
+ * `min_score` is left alone on purpose — results existed and were filtered, so
+ * that search did run.
+ */
 function printEmptySearchResults(format: OutputFormat, reason: EmptySearchReason = "no_results"): void {
+  const failure = reason === "no_results" ? providerFailure() : null;
+  if (failure) {
+    // The format-shaped empty output is still written below, so a consumer
+    // parsing stdout is not handed a broken document on top of a failed run.
+    // The exit status is set once, at the end of dispatch.
+    console.error(
+      `qmd: the ${failure.operation} provider could not be reached, so this search did not run.\n` +
+        `     ${failure.message}\n` +
+        `     This is not an empty result: nothing was searched. Fix the provider and retry.`,
+    );
+  }
   if (format === "json") {
     console.log("[]");
     return;
@@ -2473,6 +2516,10 @@ function printEmptySearchResults(format: OutputFormat, reason: EmptySearchReason
 
   if (reason === "min_score") {
     console.log("No results found above minimum score threshold.");
+    return;
+  }
+  if (failure) {
+    console.log("Search did not run.");
     return;
   }
   console.log("No results found.");
@@ -4337,6 +4384,20 @@ async function showDoctor(): Promise<void> {
     nextSteps.push("Run `qmd embed --force` to rebuild existing vectors, then rerun `qmd doctor`.");
   }
 
+  // The checks above spend real provider calls, so by here it is known whether
+  // the provider answers. Reported as its own line and, more usefully, as the
+  // exit status: a caller that has to read this prose to find out is a caller
+  // that breaks the day the prose changes.
+  const failure = providerFailure();
+  if (failure) {
+    doctorCheck("search provider", false, `${failure.operation} failed: ${failure.message}`);
+    nextSteps.push("Fix the search provider — every vector search returns nothing until it answers.");
+  } else if (providerAttempted()) {
+    doctorCheck("search provider", true, "answered every call made during these checks");
+  } else {
+    doctorCheck("search provider", true, "not exercised by these checks, so nothing is claimed about it");
+  }
+
   const steps = normalizedDoctorNextSteps(nextSteps);
   if (steps.length > 0) {
     console.log(`\n${c.bold}Recommended next step${steps.length === 1 ? "" : "s"}${c.reset}`);
@@ -5122,7 +5183,12 @@ if (isMain) {
   }
 
   if (cli.command !== "mcp") {
-    await finishSuccessfulCliCommand({
+    // Decided once, here, rather than by each command setting an exit code that
+    // this tail would then overwrite with 0. A provider that never answered
+    // means the command reported on work it could not do, and finishing that as
+    // a success erases the only machine-readable trace of it.
+    const finish = providerFailure() ? finishFailedCliCommand : finishSuccessfulCliCommand;
+    await finish({
       command: cli.command,
       format: cli.opts.format,
     });

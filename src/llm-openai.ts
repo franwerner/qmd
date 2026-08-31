@@ -48,6 +48,73 @@ export type OpenAICompatibleConfig = {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Which call could not be made. */
+export type ProviderOperation = "embed" | "generate" | "rerank";
+
+/** A provider call that did not happen, as opposed to one that found nothing. */
+export type ProviderFailure = {
+  operation: ProviderOperation;
+  message: string;
+};
+
+/**
+ * Provider failures seen since the process started.
+ *
+ * Every operation below answers `null` — or an empty list, or the unranked
+ * order — when the provider cannot be reached. That is the right thing for a
+ * caller mid-pipeline: one missing embedding should not abort an ingest of ten
+ * thousand chunks. But it makes "the provider said there is nothing" and "the
+ * provider was never asked" the same value, and by the time it reaches the top
+ * of a search the difference is gone: an expired key produces an empty result
+ * set that is indistinguishable from an honest miss, printed as `No results
+ * found.` and exited 0.
+ *
+ * So the failure is recorded here as well as logged. Nothing in the pipeline
+ * changes behaviour; the command at the top asks, once, whether the work it is
+ * about to report on could actually be done.
+ *
+ * Module-level rather than per-instance because a command builds its clients
+ * where it needs them and the question is asked in a different place entirely —
+ * threading a channel through every construction site would be a larger change
+ * for the same answer.
+ */
+let firstFailure: ProviderFailure | null = null;
+let attempts = 0;
+
+/**
+ * Records a provider call that could not be made.
+ *
+ * The **first** is kept, not the last: later failures are usually consequences
+ * of the same outage, and the first one names the cause.
+ */
+export function noteProviderFailure(operation: ProviderOperation, message: string): void {
+  if (firstFailure === null) {
+    firstFailure = { operation, message };
+  }
+}
+
+/** The first provider failure since the last reset, if there was one. */
+export function providerFailure(): ProviderFailure | null {
+  return firstFailure;
+}
+
+/**
+ * Whether the provider was called at all.
+ *
+ * Without it, "no failure recorded" is ambiguous: it also describes a run that
+ * never asked. A health check reporting *reachable* on that basis would be
+ * asserting something it did not test.
+ */
+export function providerAttempted(): boolean {
+  return attempts > 0;
+}
+
+/** Forgets what has been recorded. For tests, and for a long-lived process. */
+export function clearProviderFailures(): void {
+  firstFailure = null;
+  attempts = 0;
+}
+
 export class OpenAICompatible implements LLM {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -77,6 +144,7 @@ export class OpenAICompatible implements LLM {
   }
 
   private async post(url: string, body: unknown, apiKey: string): Promise<any> {
+    attempts++;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -110,7 +178,9 @@ export class OpenAICompatible implements LLM {
       if (!Array.isArray(embedding)) return null;
       return { embedding, model };
     } catch (err) {
-      console.error(`[openai] embed failed: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      console.error(`[openai] embed failed: ${message}`);
+      noteProviderFailure("embed", message);
       return null;
     }
   }
@@ -138,7 +208,9 @@ export class OpenAICompatible implements LLM {
         return embedding ? { embedding, model } : null;
       });
     } catch (err) {
-      console.error(`[openai] embedBatch failed: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      console.error(`[openai] embedBatch failed: ${message}`);
+      noteProviderFailure("embed", message);
       return texts.map(() => null);
     }
   }
@@ -160,7 +232,9 @@ export class OpenAICompatible implements LLM {
       if (typeof text !== "string") return null;
       return { text, model, done: true };
     } catch (err) {
-      console.error(`[openai] generate failed: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      console.error(`[openai] generate failed: ${message}`);
+      noteProviderFailure("generate", message);
       return null;
     }
   }
@@ -263,7 +337,11 @@ export class OpenAICompatible implements LLM {
         model: model ?? "rerank",
       };
     } catch (err) {
-      console.error(`[openai] rerank failed, keeping retrieval order: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      console.error(`[openai] rerank failed, keeping retrieval order: ${message}`);
+      // Recorded, though this one degrades honestly: the results are real, only
+      // their order is the retrieval order rather than the reranked one.
+      noteProviderFailure("rerank", message);
       return passthrough();
     }
   }
