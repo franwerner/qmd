@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Installing from a release tag no longer dies at the build step.
+  `scripts/build.mjs` invokes `node_modules/typescript/bin/tsc` by path, but
+  `typescript` was never declared as a dependency — it resolved only on
+  machines where a package manager happened to leave it in the tree through
+  something else, which is never the case on a clean install.
+
 ## [2.8.3-mate.1] - 2026-08-31
 
 This fork now has a release path of its own. It publishes to no registry:
