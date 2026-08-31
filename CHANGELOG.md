@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.2] - 2026-08-31
+
 ### Fixed
 
 - Installing from a release tag no longer dies at the build step.
