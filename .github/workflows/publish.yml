@@ -45,9 +45,16 @@ jobs:
       # `npm pack` runs prepare, so this builds dist/ AND produces the tarball
       # that gets attached below. A broken build still fails here, before the
       # release exists.
+      #
+      # qmd.tgz is a fixed-name copy of the same bytes, attached alongside the
+      # versioned asset so releases/latest/download/qmd.tgz always resolves to
+      # the newest release. See docs/RELEASE-CONTRACT.md.
       - name: Pack the install tarball
         id: pack
-        run: echo "tarball=$(npm pack --silent | tail -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          TARBALL=$(npm pack --silent | tail -1)
+          cp "$TARBALL" "$RUNNER_TEMP/qmd.tgz"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Extract release notes
         id: notes
@@ -66,6 +73,7 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --latest \
             --notes-file /tmp/release-notes.md \
-            "${{ steps.pack.outputs.tarball }}"
+            "${{ steps.pack.outputs.tarball }}" \
+            "$RUNNER_TEMP/qmd.tgz"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
