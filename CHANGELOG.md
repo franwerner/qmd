@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.6] - 2026-09-01
+
 ### Added
 
 - Every release now carries a fixed-name `qmd.tgz` asset alongside the
