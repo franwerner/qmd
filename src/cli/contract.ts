@@ -68,6 +68,6 @@ export type CollectionAckPayload = WithSchema<{
 }>;
 
 /** Prints one JSON document to stdout, prefixed with the contract's schema version. */
-export function emitContract(body: object): void {
+export function emitContract<T extends Record<string, unknown>>(body: T): void {
   console.log(JSON.stringify({ schemaVersion: CONTRACT_SCHEMA_VERSION, ...body }, null, 2));
 }
