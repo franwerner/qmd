@@ -29,7 +29,8 @@ You can read more about QMD's progress in the [CHANGELOG](CHANGELOG.md).
 
 ```sh
 # Install globally from a release tarball (this fork is not on npm)
-npm install -g https://github.com/franwerner/qmd/releases/download/v2.8.3-mate.4/tobilu-qmd-2.8.3-mate.4.tgz
+# See docs/RELEASE-CONTRACT.md for what this URL guarantees.
+npm install -g https://github.com/franwerner/qmd/releases/latest/download/qmd.tgz
 
 # Create collections for your notes, docs, and meeting transcripts
 qmd collection add ~/notes --name notes
@@ -585,12 +586,10 @@ This fork is not published to npm. Every release carries a packed tarball;
 install that:
 
 ```sh
-npm install -g https://github.com/franwerner/qmd/releases/download/v2.8.3-mate.4/tobilu-qmd-2.8.3-mate.4.tgz
+npm install -g https://github.com/franwerner/qmd/releases/latest/download/qmd.tgz
 ```
 
-The tarball already contains the compiled `dist/`, so nothing of this project is
-built on your machine — only the native dependencies (`better-sqlite3`,
-`node-llama-cpp`, `sqlite-vec`) are fetched or compiled as usual.
+See [`docs/RELEASE-CONTRACT.md`](docs/RELEASE-CONTRACT.md) for what every release guarantees.
 
 Installing from the git URL (`github:franwerner/qmd#<tag>`) does **not** work:
 npm runs a git dependency's `prepare` inside a clone that has no `node_modules`,

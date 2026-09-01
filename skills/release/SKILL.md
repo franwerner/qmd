@@ -164,9 +164,13 @@ suffix, which GitHub reads as a semver prerelease; without the flag the
 repository would permanently show no latest release, which is the one thing
 people are pointed at to install.
 
-The release also carries `tobilu-qmd-<version>.tgz`, built by `npm pack` in the
-workflow. After cutting a release, update the install URL in `README.md` — it
-names the version, so it goes stale on every cut.
+The release also carries `tobilu-qmd-<version>.tgz`, built by `npm pack` in
+the workflow, plus a fixed-name `qmd.tgz` copy of the same bytes attached
+alongside it. That fixed name is what makes
+`releases/latest/download/qmd.tgz` resolve to whichever release is marked
+latest, so `README.md`'s install URL never needs a per-release update. See
+[`docs/RELEASE-CONTRACT.md`](../../docs/RELEASE-CONTRACT.md) for the full set
+of release guarantees.
 
 ## Git Hooks
 

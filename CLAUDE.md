@@ -184,6 +184,8 @@ find `tsc`.
 Use `/release` to cut one. Full changelog standards, release workflow, and git
 hook setup are documented in the [release skill](skills/release/SKILL.md).
 
+See [`docs/RELEASE-CONTRACT.md`](docs/RELEASE-CONTRACT.md) for what every release guarantees.
+
 Key points:
 - Versions are `<upstream-base>-mate.N` (e.g. `2.8.3-mate.1`). The base is
   whatever upstream version this fork sits on; the counter resets to `.1`
