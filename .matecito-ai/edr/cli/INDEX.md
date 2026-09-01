@@ -7,6 +7,7 @@ The qmd CLI entrypoint and its machine-readable output contract.
 | EDR | Status | Consultá cuando... |
 |---|---|---|
 | [contract-module-boundary.md](contract-module-boundary.md) | Accepted | Adding a new contract payload/type, or deciding where a new CLI helper function belongs |
+| [contract-facts-render-split.md](contract-facts-render-split.md) | Accepted | Splitting a new contract command into collect/render/payload, or touching an existing command's side effects/ordering |
 
 ## No aplican en este dominio
 
