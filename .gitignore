@@ -22,3 +22,5 @@ texts/
 finetune/outputs/
 finetune/data/train/
 .claude/
+
+.matecito-ai/
