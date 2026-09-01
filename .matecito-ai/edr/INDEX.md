@@ -16,6 +16,8 @@ Las decisiones están organizadas por **dominio**. Este índice te dice qué dom
 | Dominio | Qué agrupa | Índice |
 |---|---|---|
 | `ci` | Continuous integration workflows and checks | [ci/INDEX.md](ci/INDEX.md) |
+| `cli` | The qmd CLI entrypoint and its machine-readable output contract | [cli/INDEX.md](cli/INDEX.md) |
+| `testing` | Test suite conventions and regression-net coverage | [testing/INDEX.md](testing/INDEX.md) |
 
 **Leyenda de status:** `Accepted` = vigente · `Pending` = decidir más adelante · `Not Applicable` = decidido que no aplica · `Deferred` = postergado con condición.
 
