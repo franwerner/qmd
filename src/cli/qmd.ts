@@ -97,7 +97,14 @@ import {
   type OutputFormat,
 } from "./formatter.js";
 import { resolveCommit } from "./version.js";
-import { CONTRACT_SCHEMA_VERSION, emitContract, type StatusPayload, type CollectionListPayload } from "./contract.js";
+import {
+  CONTRACT_SCHEMA_VERSION,
+  emitContract,
+  type StatusPayload,
+  type VersionPayload,
+  type CollectionListPayload,
+  type CollectionShowPayload,
+} from "./contract.js";
 import {
   getCollection as getCollectionFromYaml,
   listCollections as yamlListCollections,
@@ -1984,6 +1991,73 @@ function collectionList(format: OutputFormat): void {
     renderCollectionListText(facts);
   }
   closeDb();
+}
+
+type CollectionShowFacts = {
+  name: string;
+  path: string;
+  pattern: string;
+  ignore: string[];
+  includeByDefault: boolean;
+  update: string | null;
+  hasContextMap: boolean;
+  contextCount: number;
+};
+
+/** Raw `getCollectionFromYaml(name)` fields for `collection show`; exits non-zero before any payload is built when the collection is unknown. */
+function collectCollectionShowFacts(name: string): CollectionShowFacts {
+  const col = getCollectionFromYaml(name);
+  if (!col) {
+    console.error(`Collection not found: ${name}`);
+    process.exit(1);
+  }
+  return {
+    name,
+    path: col.path,
+    pattern: col.pattern,
+    ignore: col.ignore ?? [],
+    includeByDefault: col.includeByDefault !== false,
+    update: col.update ?? null,
+    hasContextMap: !!col.context,
+    contextCount: col.context ? Object.keys(col.context).length : 0,
+  };
+}
+
+/** Owns every formatting transform for `collection show`'s text output — byte-identical to before the split. */
+function renderCollectionShowText(facts: CollectionShowFacts): void {
+  console.log(`Collection: ${facts.name}`);
+  console.log(`  Path:     ${facts.path}`);
+  console.log(`  Pattern:  ${facts.pattern}`);
+  console.log(`  Include:  ${facts.includeByDefault ? 'yes (default)' : 'no'}`);
+  if (facts.update) {
+    console.log(`  Update:   ${facts.update}`);
+  }
+  if (facts.hasContextMap) {
+    console.log(`  Contexts: ${facts.contextCount}`);
+  }
+}
+
+/** Explicit projection onto the ratified `CollectionShowPayload` shape — an extra field fails to compile. */
+function collectionShowPayload(facts: CollectionShowFacts): CollectionShowPayload {
+  return {
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    name: facts.name,
+    path: facts.path,
+    pattern: facts.pattern,
+    ignore: facts.ignore,
+    includeByDefault: facts.includeByDefault,
+    update: facts.update,
+    contextCount: facts.contextCount,
+  };
+}
+
+function collectionShow(name: string, format: OutputFormat): void {
+  const facts = collectCollectionShowFacts(name);
+  if (format === "json") {
+    emitContract(collectionShowPayload(facts));
+  } else {
+    renderCollectionShowText(facts);
+  }
 }
 
 /** Canonical --mask, with --glob as the alias OpenClaw and others already pass (#536). */
@@ -4573,13 +4647,27 @@ function readPackageJson(): PackageJson {
   return JSON.parse(readFileSync(pkgPath, "utf-8"));
 }
 
-function showVersion(): void {
+/** Explicit projection onto the ratified `VersionPayload` shape — an extra field fails to compile. */
+function versionPayload(pkg: PackageJson, commit: string | null): VersionPayload {
+  return {
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    version: pkg.version,
+    commit,
+  };
+}
+
+function showVersion(format: OutputFormat): void {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const pkg = readPackageJson();
 
   // Prefer the commit stamped in at build time; fall back to the checkout's
   // HEAD only when this really is qmd's own checkout. See src/cli/version.ts.
   const commit = resolveCommit(scriptDir, pathResolve(scriptDir, "..", ".."));
+
+  if (format === "json") {
+    emitContract(versionPayload(pkg, commit || null));
+    return;
+  }
 
   const versionStr = commit ? `${pkg.version} (${commit})` : pkg.version;
   console.log(`qmd ${versionStr}`);
@@ -4601,7 +4689,7 @@ if (isMain) {
   const cli = parseCLI();
 
   if (cli.values.version) {
-    showVersion();
+    showVersion(cli.opts.format);
     process.exit(0);
   }
 
@@ -4856,23 +4944,7 @@ if (isMain) {
             console.error("Usage: qmd collection show <name>");
             process.exit(1);
           }
-          const { getCollection } = await import("../collections.js");
-          const col = getCollection(name);
-          if (!col) {
-            console.error(`Collection not found: ${name}`);
-            process.exit(1);
-          }
-          console.log(`Collection: ${name}`);
-          console.log(`  Path:     ${col.path}`);
-          console.log(`  Pattern:  ${col.pattern}`);
-          console.log(`  Include:  ${col.includeByDefault !== false ? 'yes (default)' : 'no'}`);
-          if (col.update) {
-            console.log(`  Update:   ${col.update}`);
-          }
-          if (col.context) {
-            const ctxCount = Object.keys(col.context).length;
-            console.log(`  Contexts: ${ctxCount}`);
-          }
+          collectionShow(name, cli.opts.format);
           break;
         }
 
