@@ -31,6 +31,21 @@ describe("package test task", () => {
   });
 });
 
+describe("release asset and install-smoke wiring", () => {
+  test("publish.yml copies and attaches the fixed-name qmd.tgz asset", () => {
+    const publishWorkflow = readFileSync(new URL(".github/workflows/publish.yml", root), "utf8");
+    expect(publishWorkflow).toContain('cp "$TARBALL" "$RUNNER_TEMP/qmd.tgz"');
+    expect(publishWorkflow).toContain('"$RUNNER_TEMP/qmd.tgz"');
+    expect(publishWorkflow).toContain("gh release create");
+  });
+
+  test("ci.yml runs the tarball-install-smoke check on every push/PR", () => {
+    const ciWorkflow = readFileSync(new URL(".github/workflows/ci.yml", root), "utf8");
+    expect(ciWorkflow).toContain("install-smoke:");
+    expect(ciWorkflow).toContain("node scripts/tarball-install-smoke.mjs");
+  });
+});
+
 describe("package grammar distribution", () => {
   test("installs AST grammar wasm packages as required runtime dependencies", () => {
     for (const dep of ["tree-sitter-typescript", "tree-sitter-python", "tree-sitter-go", "tree-sitter-rust"]) {
