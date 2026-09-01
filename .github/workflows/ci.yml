@@ -73,3 +73,22 @@ jobs:
           CI: true
           DYLD_LIBRARY_PATH: /opt/homebrew/opt/sqlite/lib
           LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+
+  install-smoke:
+    name: Tarball install smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install SQLite
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - run: npm install
+
+      - name: Tarball install smoke
+        run: node scripts/tarball-install-smoke.mjs
