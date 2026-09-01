@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every release now carries a fixed-name `qmd.tgz` asset alongside the
+  versioned tarball, so `releases/latest/download/qmd.tgz` always resolves to
+  the newest release without naming a version — no more editing README's
+  install URL after every cut. Releases are still marked `--latest`
+  explicitly, overriding GitHub's reading of this fork's `-mate.N` suffix as a
+  semver prerelease.
+- CI now packs the tarball and installs it into a scratch target outside the
+  repository on every push (`install-smoke` job), asserting no install-time
+  build script exists and that the installed CLI actually runs — the artifact
+  a consumer installs is proven installable, not just assumed to be.
+- `qmd status`, `qmd --version`, `qmd collection list`, `qmd collection show`
+  (alias `info`), and the six mutating `collection` subcommands now emit a
+  single machine-readable JSON document under `--format json`, each with a
+  `schemaVersion` field that changes only on a non-additive change to that
+  payload's fields. See `docs/RELEASE-CONTRACT.md` for the full set of
+  release guarantees, including what each one explicitly does not promise.
+
 ## [2.8.3-mate.5] - 2026-08-31
 
 ### Fixed
