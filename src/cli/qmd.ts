@@ -104,6 +104,7 @@ import {
   type VersionPayload,
   type CollectionListPayload,
   type CollectionShowPayload,
+  type CollectionAckPayload,
 } from "./contract.js";
 import {
   getCollection as getCollectionFromYaml,
@@ -157,6 +158,22 @@ import {
 let store: ReturnType<typeof createStore> | null = null;
 let storeDbPathOverride: string | undefined;
 let currentIndexName = "index";
+
+/** `collection` subcommands that are part of the machine-readable contract. */
+const CONTRACT_COLLECTION_SUBCOMMANDS = new Set([
+  "list", "show", "info",
+  "add", "remove", "rm", "rename", "mv",
+  "update-cmd", "set-update", "include", "exclude",
+]);
+
+/**
+ * Armed once, in `main`, when the resolved command is a contract command
+ * (`status`, `--version`, or a `collection` subcommand in
+ * `CONTRACT_COLLECTION_SUBCOMMANDS`) run with `--format json`. `note()`
+ * reads this so stdout carries exactly one JSON document under that
+ * combination — see the `cli/contract-stdout-purity` decision.
+ */
+let contractJsonMode = false;
 
 function getStore(): ReturnType<typeof createStore> {
   if (!store) {
@@ -213,6 +230,15 @@ function closeDb(): void {
   if (store) {
     store.close();
     store = null;
+  }
+}
+
+/** Prints prose; under `contractJsonMode` it routes to stderr instead of stdout, so a contract command's stdout stays a single JSON document. */
+function note(msg: string): void {
+  if (contractJsonMode) {
+    console.error(msg);
+  } else {
+    console.log(msg);
   }
 }
 
@@ -2060,6 +2086,15 @@ function collectionShow(name: string, format: OutputFormat): void {
   }
 }
 
+/** One ack envelope for all six mutating `collection` subcommands. In `cli` mode reproduces today's colored checkmark line; in `json` mode emits the ratified ack payload. */
+function emitCollectionAck(format: OutputFormat, command: string, collection: string, message: string): void {
+  if (format === "json") {
+    emitContract({ command, collection, ok: true, message } satisfies Omit<CollectionAckPayload, "schemaVersion">);
+  } else {
+    console.log(`${c.green}✓${c.reset} ${message}`);
+  }
+}
+
 /** Canonical --mask, with --glob as the alias OpenClaw and others already pass (#536). */
 function collectionGlobFromCli(values: { mask?: unknown; glob?: unknown }): string {
   const mask = typeof values.mask === "string" && values.mask.length > 0 ? values.mask : undefined;
@@ -2067,7 +2102,7 @@ function collectionGlobFromCli(values: { mask?: unknown; glob?: unknown }): stri
   return mask ?? glob ?? DEFAULT_GLOB;
 }
 
-async function collectionAdd(pwd: string, globPattern: string, name?: string): Promise<void> {
+async function collectionAdd(pwd: string, globPattern: string, name: string | undefined, format: OutputFormat): Promise<void> {
   // If name not provided, generate from pwd basename
   let collName = name;
   if (!collName) {
@@ -2103,13 +2138,13 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   resyncConfig();
 
   // Create the collection and index files
-  console.log(`Creating collection '${collName}'...`);
+  note(`Creating collection '${collName}'...`);
   const newColl = getCollectionFromYaml(collName);
   await indexFiles(pwd, globPattern, collName, false, newColl?.ignore);
-  console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
+  emitCollectionAck(format, "collection.add", collName, `Collection '${collName}' created successfully`);
 }
 
-function collectionRemove(name: string): void {
+function collectionRemove(name: string, format: OutputFormat): void {
   // Check if collection exists in YAML
   const coll = getCollectionFromYaml(name);
   if (!coll) {
@@ -2124,14 +2159,16 @@ function collectionRemove(name: string): void {
   yamlRemoveCollectionFn(name);
   closeDb();
 
-  console.log(`${c.green}✓${c.reset} Removed collection '${name}'`);
-  console.log(`  Deleted ${result.deletedDocs} documents`);
-  if (result.cleanedHashes > 0) {
-    console.log(`  Cleaned up ${result.cleanedHashes} orphaned content hashes`);
+  emitCollectionAck(format, "collection.remove", name, `Removed collection '${name}'`);
+  if (format !== "json") {
+    console.log(`  Deleted ${result.deletedDocs} documents`);
+    if (result.cleanedHashes > 0) {
+      console.log(`  Cleaned up ${result.cleanedHashes} orphaned content hashes`);
+    }
   }
 }
 
-function collectionRename(oldName: string, newName: string): void {
+function collectionRename(oldName: string, newName: string, format: OutputFormat): void {
   // Check if old collection exists in YAML
   const coll = getCollectionFromYaml(oldName);
   if (!coll) {
@@ -2154,8 +2191,10 @@ function collectionRename(oldName: string, newName: string): void {
   yamlRenameCollectionFn(oldName, newName);
   closeDb();
 
-  console.log(`${c.green}✓${c.reset} Renamed collection '${oldName}' to '${newName}'`);
-  console.log(`  Virtual paths updated: ${c.cyan}qmd://${oldName}/${c.reset} → ${c.cyan}qmd://${newName}/${c.reset}`);
+  emitCollectionAck(format, "collection.rename", newName, `Renamed collection '${oldName}' to '${newName}'`);
+  if (format !== "json") {
+    console.log(`  Virtual paths updated: ${c.cyan}qmd://${oldName}/${c.reset} → ${c.cyan}qmd://${newName}/${c.reset}`);
+  }
 }
 
 async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false, ignorePatterns?: string[]): Promise<void> {
@@ -2172,7 +2211,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     throw new Error("Collection name is required. Collections must be defined in ~/.config/qmd/index.yml");
   }
 
-  console.log(`Collection: ${resolvedPwd} (${globPattern})`);
+  note(`Collection: ${resolvedPwd} (${globPattern})`);
 
   progress.indeterminate();
   const allIgnore = [
@@ -2196,7 +2235,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const hasNoFiles = total === 0;
   if (hasNoFiles) {
     progress.clear();
-    console.log("No files found matching pattern.");
+    note("No files found matching pattern.");
     // Continue so the deactivation pass can mark previously indexed docs as inactive.
   }
 
@@ -2296,14 +2335,14 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const needsEmbedding = getHashesNeedingEmbedding(db);
 
   progress.clear();
-  console.log(`\nIndexed: ${indexed} new, ${updated} updated, ${unchanged} unchanged, ${removed} removed`);
+  note(`\nIndexed: ${indexed} new, ${updated} updated, ${unchanged} unchanged, ${removed} removed`);
   reportSkippedReads(skippedFiles);
   if (orphanedContent > 0) {
-    console.log(`Cleaned up ${orphanedContent} orphaned content hash(es)`);
+    note(`Cleaned up ${orphanedContent} orphaned content hash(es)`);
   }
 
   if (needsEmbedding > 0 && !suppressEmbedNotice) {
-    console.log(`\nRun 'qmd embed' to update embeddings (${needsEmbedding} unique hashes need vectors)`);
+    note(`\nRun 'qmd embed' to update embeddings (${needsEmbedding} unique hashes need vectors)`);
   }
 
   closeDb();
@@ -4688,6 +4727,17 @@ if (isMain) {
 
   const cli = parseCLI();
 
+  // Contract commands: status, --version, and the collection subcommands in
+  // CONTRACT_COLLECTION_SUBCOMMANDS. Arming on the command, not the format
+  // alone, keeps non-contract commands (e.g. `update`) unaffected by note().
+  if (cli.opts.format === "json" && (
+    cli.values.version
+    || cli.command === "status"
+    || (cli.command === "collection" && CONTRACT_COLLECTION_SUBCOMMANDS.has(cli.args[0] ?? ""))
+  )) {
+    contractJsonMode = true;
+  }
+
   if (cli.values.version) {
     showVersion(cli.opts.format);
     process.exit(0);
@@ -4863,7 +4913,7 @@ if (isMain) {
             process.exit(1);
           }
 
-          await collectionAdd(resolvedPwd, globPattern, name);
+          await collectionAdd(resolvedPwd, globPattern, name, cli.opts.format);
           break;
         }
 
@@ -4874,7 +4924,7 @@ if (isMain) {
             console.error("  Use 'qmd collection list' to see available collections");
             process.exit(1);
           }
-          collectionRemove(cli.args[1]);
+          collectionRemove(cli.args[1], cli.opts.format);
           break;
         }
 
@@ -4885,7 +4935,7 @@ if (isMain) {
             console.error("  Use 'qmd collection list' to see available collections");
             process.exit(1);
           }
-          collectionRename(cli.args[1], cli.args[2]);
+          collectionRename(cli.args[1], cli.args[2], cli.opts.format);
           break;
         }
 
@@ -4909,11 +4959,12 @@ if (isMain) {
           // The user just typed this command, so it needs no separate approval;
           // re-record so the digest covers the new hook set (#886).
           trustCurrentConfig();
-          if (cmd) {
-            console.log(`✓ Set update command for '${name}': ${cmd}`);
-          } else {
-            console.log(`✓ Cleared update command for '${name}'`);
-          }
+          emitCollectionAck(
+            cli.opts.format,
+            "collection.update-cmd",
+            name,
+            cmd ? `Set update command for '${name}': ${cmd}` : `Cleared update command for '${name}'`
+          );
           break;
         }
 
@@ -4933,7 +4984,12 @@ if (isMain) {
           }
           const include = subcommand === 'include';
           updateCollectionSettings(name, { includeByDefault: include });
-          console.log(`✓ Collection '${name}' ${include ? 'included in' : 'excluded from'} default queries`);
+          emitCollectionAck(
+            cli.opts.format,
+            include ? "collection.include" : "collection.exclude",
+            name,
+            `Collection '${name}' ${include ? 'included in' : 'excluded from'} default queries`
+          );
           break;
         }
 
