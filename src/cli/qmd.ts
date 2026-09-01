@@ -97,6 +97,7 @@ import {
   type OutputFormat,
 } from "./formatter.js";
 import { resolveCommit } from "./version.js";
+import { CONTRACT_SCHEMA_VERSION, emitContract, type StatusPayload, type CollectionListPayload } from "./contract.js";
 import {
   getCollection as getCollectionFromYaml,
   listCollections as yamlListCollections,
@@ -550,72 +551,69 @@ function formatOrphanedVectorHint(orphaned: number, total: number): string {
   return `${orphaned} orphaned embedding chunks (${pct}% of vectors) — run 'qmd cleanup' to reclaim space`;
 }
 
-async function showStatus(): Promise<void> {
+type StatusAstFacts = {
+  available: boolean;
+  languages: { language: string; available: boolean; error: string | null }[];
+};
+
+type StatusFacts = {
+  dbPath: string;
+  indexSizeBytes: number;
+  collections: ReturnType<typeof listCollections>;
+  totalDocs: number;
+  vectorCount: number;
+  orphanedVectors: number;
+  needsEmbedding: number;
+  mostRecentModified: string | null;
+  mcpRunning: boolean;
+  mcpPid: number | null;
+  contextsByCollection: Map<string, { path_prefix: string; context: string }[]>;
+  ast: StatusAstFacts | null;
+  models: { embed: string; rerank: string; generate: string };
+  collectionsWithUpdate: Set<string>;
+};
+
+/**
+ * Every read `status` needs, in one pass, with no formatting applied.
+ * The stale-MCP-PID cleanup is the one mutating side effect here, so it now
+ * runs before any line is printed rather than after the first two — see the
+ * `cli/contract-facts-render-split` EDR.
+ */
+async function collectStatusFacts(): Promise<StatusFacts> {
   const dbPath = getDbPath();
   const db = getDb();
 
-  // Collections are defined in YAML; no duplicate cleanup needed.
-  // Collections are defined in YAML; no duplicate cleanup needed.
-
-  // Index size
-  let indexSize = 0;
+  let indexSizeBytes = 0;
   try {
-    const stat = statSync(dbPath).size;
-    indexSize = stat;
+    indexSizeBytes = statSync(dbPath).size;
   } catch { }
 
-  // Collections info (from YAML + database stats)
   const collections = listCollections(db);
 
-  // Overall stats
-  const totalDocs = db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number };
-  const vectorCount = db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number };
+  const totalDocs = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
+  const vectorCount = (db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number }).count;
   const statusEmbedModel = resolveEmbedModelForCli();
   const needsEmbedding = getHashesNeedingEmbedding(db, undefined, statusEmbedModel);
+  const mostRecentRow = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
+  const orphanedVectors = countOrphanedVectors(db);
 
-  // Most recent update across all collections
-  const mostRecent = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
-
-  console.log(`${c.bold}QMD Status${c.reset}\n`);
-  console.log(`Index: ${dbPath}`);
-  console.log(`Size:  ${formatBytes(indexSize)}`);
-
-  // MCP daemon status (check PID file liveness; scoped per --index)
+  let mcpRunning = false;
+  let mcpPid: number | null = null;
   const { pidPath: mcpPidPath } = mcpDaemonPaths();
   if (existsSync(mcpPidPath)) {
-    const mcpPid = parseInt(readFileSync(mcpPidPath, "utf-8").trim());
-    if (isQmdMcpPid(mcpPid)) {
-      console.log(`MCP:   ${c.green}running${c.reset} (PID ${mcpPid})`);
+    const pid = parseInt(readFileSync(mcpPidPath, "utf-8").trim());
+    if (isQmdMcpPid(pid)) {
+      mcpRunning = true;
+      mcpPid = pid;
     } else {
       try { unlinkSync(mcpPidPath); } catch { /* ignore */ }
       // Stale / recycled PID file cleaned up silently
     }
   }
-  console.log("");
 
-  const orphanedVectors = countOrphanedVectors(db);
-
-  console.log(`${c.bold}Documents${c.reset}`);
-  console.log(`  Total:    ${totalDocs.count} files indexed`);
-  console.log(`  Vectors:  ${vectorCount.count} embedded`);
-  if (orphanedVectors > 0) {
-    const pct = vectorCount.count > 0 ? Math.round((orphanedVectors / vectorCount.count) * 100) : 0;
-    console.log(`  ${c.yellow}Orphaned: ${orphanedVectors} embedding chunks (${pct}%)${c.reset} — run 'qmd cleanup'`);
-  }
-  if (needsEmbedding > 0) {
-    console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'qmd embed')`);
-  }
-  if (mostRecent.latest) {
-    const lastUpdate = new Date(mostRecent.latest);
-    console.log(`  Updated:  ${formatTimeAgo(lastUpdate)}`);
-  }
-
-  // Get all contexts grouped by collection (from YAML)
   const allContexts = listAllContexts();
   const contextsByCollection = new Map<string, { path_prefix: string; context: string }[]>();
-
   for (const ctx of allContexts) {
-    // Group contexts by collection name
     if (!contextsByCollection.has(ctx.collection)) {
       contextsByCollection.set(ctx.collection, []);
     }
@@ -625,11 +623,72 @@ async function showStatus(): Promise<void> {
     });
   }
 
-  // AST chunking status
+  let ast: StatusAstFacts | null;
   try {
     const { getASTStatus } = await import("../ast.js");
-    const ast = await getASTStatus();
-    console.log(`\n${c.bold}AST Chunking${c.reset}`);
+    const probed = await getASTStatus();
+    ast = {
+      available: probed.available,
+      languages: probed.languages.map(l => ({ language: l.language, available: l.available, error: l.error ?? null })),
+    };
+  } catch {
+    ast = null;
+  }
+
+  const models = resolveModelsForCli();
+
+  const collectionsWithUpdate = new Set<string>();
+  for (const col of collections) {
+    if (getCollectionFromYaml(col.name)?.update) collectionsWithUpdate.add(col.name);
+  }
+
+  return {
+    dbPath,
+    indexSizeBytes,
+    collections,
+    totalDocs,
+    vectorCount,
+    orphanedVectors,
+    needsEmbedding,
+    mostRecentModified: mostRecentRow.latest,
+    mcpRunning,
+    mcpPid,
+    contextsByCollection,
+    ast,
+    models,
+    collectionsWithUpdate,
+  };
+}
+
+/** Owns every formatting transform for `status`'s text output — byte-identical to before the split. */
+function renderStatusText(facts: StatusFacts): void {
+  const { dbPath, indexSizeBytes, collections, totalDocs, vectorCount, orphanedVectors, needsEmbedding, mostRecentModified, mcpRunning, mcpPid, contextsByCollection, ast, models, collectionsWithUpdate } = facts;
+
+  console.log(`${c.bold}QMD Status${c.reset}\n`);
+  console.log(`Index: ${dbPath}`);
+  console.log(`Size:  ${formatBytes(indexSizeBytes)}`);
+
+  if (mcpRunning) {
+    console.log(`MCP:   ${c.green}running${c.reset} (PID ${mcpPid})`);
+  }
+  console.log("");
+
+  console.log(`${c.bold}Documents${c.reset}`);
+  console.log(`  Total:    ${totalDocs} files indexed`);
+  console.log(`  Vectors:  ${vectorCount} embedded`);
+  if (orphanedVectors > 0) {
+    const pct = vectorCount > 0 ? Math.round((orphanedVectors / vectorCount) * 100) : 0;
+    console.log(`  ${c.yellow}Orphaned: ${orphanedVectors} embedding chunks (${pct}%)${c.reset} — run 'qmd cleanup'`);
+  }
+  if (needsEmbedding > 0) {
+    console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'qmd embed')`);
+  }
+  if (mostRecentModified) {
+    console.log(`  Updated:  ${formatTimeAgo(new Date(mostRecentModified))}`);
+  }
+
+  console.log(`\n${c.bold}AST Chunking${c.reset}`);
+  if (ast) {
     if (ast.available) {
       const ok = ast.languages.filter(l => l.available).map(l => l.language);
       const fail = ast.languages.filter(l => !l.available);
@@ -646,8 +705,7 @@ async function showStatus(): Promise<void> {
         if (l.error) console.log(`  ${c.dim}${l.language}: ${l.error}${c.reset}`);
       }
     }
-  } catch {
-    console.log(`\n${c.bold}AST Chunking${c.reset}`);
+  } else {
     console.log(`  Status:   ${c.dim}not available${c.reset}`);
   }
 
@@ -699,11 +757,10 @@ async function showStatus(): Promise<void> {
       const match = uri.match(/^hf:([^/]+\/[^/]+)\//);
       return match ? `https://huggingface.co/${match[1]}` : uri;
     };
-    const activeModels = resolveModelsForCli();
     console.log(`\n${c.bold}Models${c.reset}`);
-    console.log(`  Embedding:   ${hfLink(activeModels.embed)}`);
-    console.log(`  Reranking:   ${hfLink(activeModels.rerank)}`);
-    console.log(`  Generation:  ${hfLink(activeModels.generate)}`);
+    console.log(`  Embedding:   ${hfLink(models.embed)}`);
+    console.log(`  Reranking:   ${hfLink(models.rerank)}`);
+    console.log(`  Generation:  ${hfLink(models.generate)}`);
   }
 
 
@@ -724,10 +781,7 @@ async function showStatus(): Promise<void> {
   }
 
   // Check for collections without update commands
-  const collectionsWithoutUpdate = collections.filter(col => {
-    const yamlCol = getCollectionFromYaml(col.name);
-    return !yamlCol?.update;
-  });
+  const collectionsWithoutUpdate = collections.filter(col => !collectionsWithUpdate.has(col.name));
   if (collectionsWithoutUpdate.length > 0 && collections.length > 1) {
     const names = collectionsWithoutUpdate.map(c => c.name).slice(0, 3).join(', ');
     const more = collectionsWithoutUpdate.length > 3 ? ` +${collectionsWithoutUpdate.length - 3} more` : '';
@@ -741,7 +795,45 @@ async function showStatus(): Promise<void> {
       console.log(`  ${tip}`);
     }
   }
+}
 
+/** Explicit projection onto the ratified `StatusPayload` shape — an extra field fails to compile. */
+function statusPayload(facts: StatusFacts): StatusPayload {
+  return {
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    index: { path: facts.dbPath, sizeBytes: facts.indexSizeBytes },
+    mcp: { running: facts.mcpRunning, pid: facts.mcpPid },
+    documents: {
+      total: facts.totalDocs,
+      vectors: facts.vectorCount,
+      orphanedVectors: facts.orphanedVectors,
+      pendingEmbedding: facts.needsEmbedding,
+      lastModified: facts.mostRecentModified,
+    },
+    ast: facts.ast
+      ? { available: facts.ast.available, languages: facts.ast.languages }
+      : { available: false, languages: [] },
+    collections: facts.collections.map(col => ({
+      name: col.name,
+      globPattern: col.glob_pattern,
+      fileCount: col.active_count,
+      lastModified: col.last_modified,
+      contexts: (facts.contextsByCollection.get(col.name) ?? []).map(ctx => ({
+        pathPrefix: ctx.path_prefix,
+        context: ctx.context,
+      })),
+    })),
+    models: facts.models,
+  };
+}
+
+async function showStatus(format: OutputFormat): Promise<void> {
+  const facts = await collectStatusFacts();
+  if (format === "json") {
+    emitContract(statusPayload(facts));
+  } else {
+    renderStatusText(facts);
+  }
   closeDb();
 }
 
@@ -1810,37 +1902,87 @@ function formatLsTime(date: Date): string {
 }
 
 // Collection management commands
-function collectionList(): void {
+type CollectionListFacts = {
+  collections: {
+    name: string;
+    globPattern: string;
+    fileCount: number;
+    lastModified: string | null;
+    ignore: string[];
+    includeByDefault: boolean;
+  }[];
+};
+
+/** Raw store + YAML reads for `collection list` — no display fallback baked in. */
+function collectCollectionListFacts(): CollectionListFacts {
   const db = getDb();
   const collections = listCollections(db);
+  return {
+    collections: collections.map(coll => {
+      const yamlColl = getCollectionFromYaml(coll.name);
+      return {
+        name: coll.name,
+        globPattern: coll.glob_pattern,
+        fileCount: coll.active_count,
+        lastModified: coll.last_modified,
+        ignore: yamlColl?.ignore ?? [],
+        includeByDefault: yamlColl?.includeByDefault !== false,
+      };
+    }),
+  };
+}
+
+/** Owns every formatting transform for `collection list`'s text output — byte-identical to before the split. */
+function renderCollectionListText(facts: CollectionListFacts): void {
+  const { collections } = facts;
 
   if (collections.length === 0) {
     console.log("No collections found. Run 'qmd collection add .' to create one.");
-    closeDb();
     return;
   }
 
   console.log(`${c.bold}Collections (${collections.length}):${c.reset}\n`);
 
   for (const coll of collections) {
-    const updatedAt = coll.last_modified ? new Date(coll.last_modified) : new Date();
+    const updatedAt = coll.lastModified ? new Date(coll.lastModified) : new Date();
     const timeAgo = formatTimeAgo(updatedAt);
-    
-    // Get YAML config to check includeByDefault
-    const yamlColl = getCollectionFromYaml(coll.name);
-    const excluded = yamlColl?.includeByDefault === false;
+
+    const excluded = coll.includeByDefault === false;
     const excludeTag = excluded ? ` ${c.yellow}[excluded]${c.reset}` : '';
 
     console.log(`${c.cyan}${coll.name}${c.reset} ${c.dim}(qmd://${coll.name}/)${c.reset}${excludeTag}`);
-    console.log(`  ${c.dim}Pattern:${c.reset}  ${coll.glob_pattern}`);
-    if (yamlColl?.ignore?.length) {
-      console.log(`  ${c.dim}Ignore:${c.reset}   ${yamlColl.ignore.join(', ')}`);
+    console.log(`  ${c.dim}Pattern:${c.reset}  ${coll.globPattern}`);
+    if (coll.ignore.length) {
+      console.log(`  ${c.dim}Ignore:${c.reset}   ${coll.ignore.join(', ')}`);
     }
-    console.log(`  ${c.dim}Files:${c.reset}    ${coll.active_count}`);
+    console.log(`  ${c.dim}Files:${c.reset}    ${coll.fileCount}`);
     console.log(`  ${c.dim}Updated:${c.reset}  ${timeAgo}`);
     console.log();
   }
+}
 
+/** Explicit projection onto the ratified `CollectionListPayload` shape — an extra field fails to compile. */
+function collectionListPayload(facts: CollectionListFacts): CollectionListPayload {
+  return {
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    collections: facts.collections.map(coll => ({
+      name: coll.name,
+      globPattern: coll.globPattern,
+      ignore: coll.ignore,
+      fileCount: coll.fileCount,
+      lastModified: coll.lastModified,
+      includeByDefault: coll.includeByDefault,
+    })),
+  };
+}
+
+function collectionList(format: OutputFormat): void {
+  const facts = collectCollectionListFacts();
+  if (format === "json") {
+    emitContract(collectionListPayload(facts));
+  } else {
+    renderCollectionListText(facts);
+  }
   closeDb();
 }
 
@@ -4601,7 +4743,7 @@ if (isMain) {
       const subcommand = cli.args[0];
       switch (subcommand) {
         case "list": {
-          collectionList();
+          collectionList(cli.opts.format);
           break;
         }
 
@@ -4774,7 +4916,7 @@ if (isMain) {
       break;
 
     case "status":
-      await showStatus();
+      await showStatus(cli.opts.format);
       break;
 
     case "doctor":
