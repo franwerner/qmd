@@ -60,6 +60,25 @@ export type CollectionShowPayload = WithSchema<{
   contextCount: number;
 }>;
 
+/** Why a model role is unusable. `null` exactly when the role is available. */
+export type CapabilityReason =
+  | "model-file-missing"
+  | "model-file-invalid"
+  | "credential-missing"
+  | "backend-not-configured";
+
+export type Capability = {
+  model: string;
+  available: boolean;
+  reason: CapabilityReason | null;
+};
+
+export type CapabilitiesPayload = WithSchema<{
+  embed: Capability;
+  rerank: Capability;
+  generate: Capability;
+}>;
+
 export type CollectionAckPayload = WithSchema<{
   command: string;
   collection: string;

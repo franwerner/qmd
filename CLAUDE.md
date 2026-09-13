@@ -18,6 +18,7 @@ qmd context rm <path>             # Remove context
 qmd get <file>[:from[:count]]     # Get by path or docid (#abc123); optional line range
 qmd multi-get <pattern>           # Get multiple docs by glob or comma-separated list
 qmd status                        # Show index status and collections
+qmd capabilities                  # Report active embed/rerank/generate models and whether each is usable
 qmd doctor                        # Diagnose config, index, model, and device issues
 qmd update                        # Re-index collections; configured update hooks run first
 qmd trust [list|revoke]           # Approve a checked-in .qmd config's hooks/paths/models

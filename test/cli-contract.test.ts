@@ -1,9 +1,9 @@
 /**
  * CLI machine-readable contract tests.
  *
- * Covers the `--format json` contract commands (`status`, `--version`,
- * `collection list`, `collection show`, and the mutating `collection`
- * subcommands) defined in `src/cli/contract.ts`.
+ * Covers the `--format json` contract commands (`status`, `capabilities`,
+ * `--version`, `collection list`, `collection show`, and the mutating
+ * `collection` subcommands) defined in `src/cli/contract.ts`.
  *
  * The `runQmd` helper reproduces the pattern from `test/cli.test.ts:43`
  * locally rather than importing it, per the design's own rationale: that is
@@ -17,7 +17,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -271,6 +271,209 @@ describe("payload key sets (additive-tolerant)", () => {
     const { stdout, exitCode } = await runQmd(["collection", "show", "does-not-exist", "--format", "json"], runOpts);
     expect(exitCode).not.toBe(0);
     expect(stdout.trim()).toBe("");
+  });
+});
+
+describe("capabilities --format json", () => {
+  const ROLES = ["embed", "rerank", "generate"] as const;
+
+  let capTestDir: string;
+  let capCacheDir: string;
+  let capConfigDir: string;
+
+  /**
+   * Clears every variable `capabilities` resolves through — the remote-backend
+   * switch (`isOpenAIBackendConfigured`) and the three per-role model
+   * overrides (`resolveModels`) — so each case's env is the whole input even
+   * on a developer or CI machine that exports some of them.
+   */
+  const localOnlyEnv = {
+    QMD_OPENAI_BASE_URL: "",
+    QMD_OPENAI_API_KEY: "",
+    OPENAI_API_KEY: "",
+    QMD_EMBED_MODEL: "",
+    QMD_RERANK_MODEL: "",
+    QMD_GENERATE_MODEL: "",
+  };
+
+  /**
+   * One config dir for every case: `capabilities` resolves the active models
+   * without persisting them, so no run leaves behind a `models:` block that
+   * would outrank the QMD_*_MODEL env vars these cases steer with.
+   */
+  function capOptsFor(env: Record<string, string>, configDir = capConfigDir) {
+    return {
+      cwd: capTestDir,
+      dbPath: join(capTestDir, "test.sqlite"),
+      configDir,
+      env: { XDG_CACHE_HOME: capCacheDir, ...env },
+    };
+  }
+
+  async function capabilities(env: Record<string, string>): Promise<any> {
+    const { stdout, exitCode } = await runQmd(["capabilities", "--format", "json"], capOptsFor(env));
+    expect(exitCode).toBe(0);
+    return parseJsonStdout(stdout);
+  }
+
+  beforeAll(async () => {
+    capTestDir = await mkdtemp(join(tmpdir(), "qmd-contract-cap-"));
+    capCacheDir = join(capTestDir, "cache");
+    capConfigDir = join(capTestDir, "config");
+    await mkdir(capConfigDir, { recursive: true });
+    await writeFile(join(capConfigDir, "index.yml"), "collections: {}\n");
+    // An empty models dir: the default hf: models resolve as not-downloaded
+    // regardless of what the developer running the suite has pulled.
+    await mkdir(join(capCacheDir, "qmd", "models"), { recursive: true });
+  });
+
+  afterAll(async () => {
+    if (capTestDir) await rm(capTestDir, { recursive: true, force: true });
+  });
+
+  test("payload key set: schemaVersion plus one Capability per role", async () => {
+    const payload = await capabilities(localOnlyEnv);
+    expect(Object.keys(payload).sort()).toEqual(["embed", "generate", "rerank", "schemaVersion"]);
+    expect(payload.schemaVersion).toBe(1);
+    for (const role of ROLES) {
+      expect(Object.keys(payload[role]).sort()).toEqual(["available", "model", "reason"]);
+      expect(typeof payload[role].model).toBe("string");
+      expect(typeof payload[role].available).toBe("boolean");
+      expect(payload[role].reason === null || typeof payload[role].reason === "string").toBe(true);
+    }
+  });
+
+  test("reason is null exactly when available", async () => {
+    const cases = [
+      await capabilities(localOnlyEnv),
+      await capabilities({ ...localOnlyEnv, QMD_OPENAI_BASE_URL: "https://example.invalid/v1", QMD_OPENAI_API_KEY: "sk-test" }),
+      await capabilities({ ...localOnlyEnv, QMD_OPENAI_BASE_URL: "https://example.invalid/v1" }),
+    ];
+    for (const payload of cases) {
+      for (const role of ROLES) {
+        expect(payload[role].reason === null).toBe(payload[role].available);
+      }
+    }
+  });
+
+  test("a configured remote backend makes every role available", async () => {
+    const payload = await capabilities({
+      ...localOnlyEnv,
+      QMD_OPENAI_BASE_URL: "https://example.invalid/v1",
+      QMD_OPENAI_API_KEY: "sk-test",
+    });
+    for (const role of ROLES) {
+      expect(payload[role].available).toBe(true);
+      expect(payload[role].reason).toBeNull();
+    }
+  });
+
+  test("credential-missing: a base URL with no key", async () => {
+    const payload = await capabilities({ ...localOnlyEnv, QMD_OPENAI_BASE_URL: "https://example.invalid/v1" });
+    for (const role of ROLES) {
+      expect(payload[role].available).toBe(false);
+      expect(payload[role].reason).toBe("credential-missing");
+    }
+  });
+
+  test("model-file-missing: a local hf: model absent from the cache", async () => {
+    const payload = await capabilities(localOnlyEnv);
+    for (const role of ROLES) {
+      expect(payload[role].model.startsWith("hf:")).toBe(true);
+      expect(payload[role].available).toBe(false);
+      expect(payload[role].reason).toBe("model-file-missing");
+    }
+  });
+
+  test("backend-not-configured: a remote model name with no remote backend", async () => {
+    const payload = await capabilities({ ...localOnlyEnv, QMD_EMBED_MODEL: "text-embedding-3-small" });
+    expect(payload.embed.model).toBe("text-embedding-3-small");
+    expect(payload.embed.available).toBe(false);
+    expect(payload.embed.reason).toBe("backend-not-configured");
+    // Resolution is per-role once no remote backend is configured.
+    expect(payload.rerank.reason).toBe("model-file-missing");
+  });
+
+  test("model-file-invalid: a cached .gguf that is not a GGUF", async () => {
+    const bogus = join(capTestDir, "bogus.gguf");
+    await writeFile(bogus, "not a gguf at all\n");
+    const payload = await capabilities({ ...localOnlyEnv, QMD_EMBED_MODEL: bogus });
+    expect(payload.embed.model).toBe(bogus);
+    expect(payload.embed.available).toBe(false);
+    expect(payload.embed.reason).toBe("model-file-invalid");
+  });
+
+  test("an untrusted project-local models: block is reported as the defaults the runtime loads", async () => {
+    const projectDir = join(capTestDir, "untrusted-project");
+    const projectConfigDir = join(capTestDir, "untrusted-project-config");
+    await mkdir(join(projectDir, ".qmd"), { recursive: true });
+    await mkdir(projectConfigDir, { recursive: true });
+    // A real GGUF: the untrusted URI must be rejected for being untrusted, not
+    // for failing the same file inspection an unavailable model already fails.
+    const customModel = join(projectDir, "custom-embed.gguf");
+    await writeFile(customModel, Buffer.concat([Buffer.from("GGUF"), Buffer.alloc(508)]));
+    await writeFile(
+      join(projectDir, ".qmd", "index.yml"),
+      `collections: {}\nmodels:\n  embed: ${JSON.stringify(customModel)}\n`
+    );
+
+    const { stdout, exitCode } = await runQmd(["capabilities", "--format", "json"], {
+      cwd: projectDir,
+      dbPath: join(projectDir, "test.sqlite"),
+      configDir: projectConfigDir,
+      env: {
+        XDG_CACHE_HOME: capCacheDir,
+        QMD_TRUST_LOCAL_CONFIG: "",
+        QMD_TRUST_UPDATE_HOOKS: "",
+        ...localOnlyEnv,
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    const payload = parseJsonStdout(stdout);
+    expect(payload.embed.model).not.toBe(customModel);
+    expect(payload.embed.model.startsWith("hf:")).toBe(true);
+    expect(payload.embed.available).toBe(false);
+    expect(payload.embed.reason).toBe("model-file-missing");
+  });
+
+  test("an unreadable model cache still emits one JSON document and exits 0", async () => {
+    const modelsDir = join(capCacheDir, "qmd", "models");
+    await chmod(modelsDir, 0o000);
+    // chmod does not deny root, so the condition this pins cannot be created
+    // when the suite runs as root — skip instead of asserting on a readable dir.
+    const denied = await readdir(modelsDir).then(() => false, () => true);
+    try {
+      if (!denied) return;
+      const { stdout, exitCode } = await runQmd(["capabilities", "--format", "json"], capOptsFor(localOnlyEnv));
+      expect(exitCode).toBe(0);
+      const payload = parseJsonStdout(stdout);
+      expect(Object.keys(payload).sort()).toEqual(["embed", "generate", "rerank", "schemaVersion"]);
+      for (const role of ROLES) {
+        expect(payload[role].available).toBe(false);
+        expect(payload[role].reason).toBe("model-file-missing");
+      }
+    } finally {
+      await chmod(modelsDir, 0o755);
+    }
+  });
+
+  test("exits 0 with no collections configured", async () => {
+    const { exitCode, stdout } = await runQmd(["capabilities"], capOptsFor(localOnlyEnv));
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Capabilities");
+  });
+
+  test("a config with no models: block is left byte-for-byte unchanged", async () => {
+    const configDir = join(capTestDir, "read-only-config");
+    await mkdir(configDir, { recursive: true });
+    const configPath = join(configDir, "index.yml");
+    const before = "collections: {}\n";
+    await writeFile(configPath, before);
+
+    const { exitCode } = await runQmd(["capabilities", "--format", "json"], capOptsFor(localOnlyEnv, configDir));
+    expect(exitCode).toBe(0);
+    expect(await readFile(configPath, "utf-8")).toBe(before);
   });
 });
 

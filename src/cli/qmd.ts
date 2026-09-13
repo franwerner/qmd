@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 import { basename, dirname, join as pathJoin, relative as relativePath, resolve as pathResolve } from "path";
 import { parseArgs } from "util";
 import { readFileSync, readdirSync, realpathSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync, lstatSync, rmSync, symlinkSync, readlinkSync, copyFileSync } from "fs";
+import type { Dirent } from "fs";
 import { createInterface } from "readline/promises";
 import {
   getPwd,
@@ -105,6 +106,9 @@ import {
   type CollectionListPayload,
   type CollectionShowPayload,
   type CollectionAckPayload,
+  type Capability,
+  type CapabilityReason,
+  type CapabilitiesPayload,
 } from "./contract.js";
 import {
   getCollection as getCollectionFromYaml,
@@ -868,6 +872,115 @@ async function showStatus(format: OutputFormat): Promise<void> {
     renderStatusText(facts);
   }
   closeDb();
+}
+
+type CapabilityFacts = {
+  model: string;
+  available: boolean;
+  reason: CapabilityReason | null;
+};
+
+type CapabilitiesFacts = {
+  embed: CapabilityFacts;
+  rerank: CapabilityFacts;
+  generate: CapabilityFacts;
+};
+
+/** True for a model qmd can satisfy from the local GGUF cache, as opposed to a name only a remote API resolves. */
+function isLocalModelReference(model: string): boolean {
+  return model.startsWith("hf:") || model.endsWith(".gguf");
+}
+
+function resolveLocalCapability(model: string): CapabilityFacts {
+  // A remote model name with no remote backend is not a missing download:
+  // `qmd pull` has nothing to fetch, so the gap is the backend, not the file.
+  if (!isLocalModelReference(model)) return { model, available: false, reason: "backend-not-configured" };
+
+  const inspection = findCachedModelInspection(model);
+  if (inspection.path) return { model, available: true, reason: null };
+  if (inspection.invalid.length > 0) return { model, available: false, reason: "model-file-invalid" };
+  return { model, available: false, reason: "model-file-missing" };
+}
+
+/** The models a query would really load, resolved without writing them back to config. */
+function resolveRuntimeModelsWithoutPersisting(): { embed: string; generate: string; rerank: string } {
+  try {
+    const configured = resolveModels(loadConfig().models);
+    // Same trust gate as resolveModelsForRuntime: a consumer polls this to
+    // decide whether it can search, so naming an untrusted local config's
+    // custom URIs would promise a model no search ever loads (#889).
+    if (localConfigIsFullyTrusted()) return configured;
+    return resolveModels();
+  } catch {
+    return resolveModels();
+  }
+}
+
+/**
+ * Reads config and the model cache only — never the index — so `capabilities`
+ * answers in a fresh install with no collections.
+ *
+ * The remote backend is a global switch rather than a per-role one
+ * (`isOpenAIBackendConfigured`), so it decides all three roles before any of
+ * them is resolved against the local cache.
+ */
+function collectCapabilitiesFacts(): CapabilitiesFacts {
+  // Not resolveModelsForCli: that one writes the resolved models back into the
+  // user's config, and a diagnostic an external consumer runs must not mutate it.
+  const models = resolveRuntimeModelsWithoutPersisting();
+  const uniform = (available: boolean, reason: CapabilityReason | null): CapabilitiesFacts => ({
+    embed: { model: models.embed, available, reason },
+    rerank: { model: models.rerank, available, reason },
+    generate: { model: models.generate, available, reason },
+  });
+
+  if (isOpenAIBackendConfigured()) return uniform(true, null);
+  if (process.env.QMD_OPENAI_BASE_URL) return uniform(false, "credential-missing");
+
+  return {
+    embed: resolveLocalCapability(models.embed),
+    rerank: resolveLocalCapability(models.rerank),
+    generate: resolveLocalCapability(models.generate),
+  };
+}
+
+/** Owns every formatting transform for `capabilities`'s text output. */
+function renderCapabilitiesText(facts: CapabilitiesFacts): void {
+  console.log(`${c.bold}Capabilities${c.reset}\n`);
+  const rows: [string, CapabilityFacts][] = [
+    ["Embedding: ", facts.embed],
+    ["Reranking: ", facts.rerank],
+    ["Generation:", facts.generate],
+  ];
+  for (const [label, cap] of rows) {
+    const mark = cap.available ? `${c.green}✓${c.reset}` : `${c.yellow}✗${c.reset}`;
+    const why = cap.reason ? ` ${c.dim}(${cap.reason})${c.reset}` : "";
+    console.log(`  ${label}  ${mark} ${cap.model}${why}`);
+  }
+}
+
+/** Explicit projection onto the ratified `CapabilitiesPayload` shape — an extra field fails to compile. */
+function capabilitiesPayload(facts: CapabilitiesFacts): CapabilitiesPayload {
+  const project = (cap: CapabilityFacts): Capability => ({
+    model: cap.model,
+    available: cap.available,
+    reason: cap.reason,
+  });
+  return {
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    embed: project(facts.embed),
+    rerank: project(facts.rerank),
+    generate: project(facts.generate),
+  };
+}
+
+function showCapabilities(format: OutputFormat): void {
+  const facts = collectCapabilitiesFacts();
+  if (format === "json") {
+    emitContract(capabilitiesPayload(facts));
+  } else {
+    renderCapabilitiesText(facts);
+  }
 }
 
 function builtinModels(): BuiltinModels {
@@ -3988,6 +4101,7 @@ function showHelp(): void {
   console.log("Maintenance:");
   console.log("  qmd init                      - Create a project-local .qmd index");
   console.log("  qmd status                    - View index + collection health");
+  console.log("  qmd capabilities              - Report the active embed/rerank/generate models and whether each is usable");
   console.log("  qmd update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  qmd trust [list|revoke]       - Approve a checked-in .qmd config's hooks/paths/models");
   console.log("  qmd embed [-f] [-c <name>]    - Generate/refresh vector embeddings");
@@ -4135,12 +4249,28 @@ function formatModelDiagnosticPath(path: string): string {
   return sanitizeDiagnosticMessage(path);
 }
 
+/**
+ * Entries of the model cache, or null when it cannot be listed. An absent or
+ * unreadable directory (root-owned after a `sudo` pull, say) holds no usable
+ * model either way, and throwing here would cost `qmd capabilities` its
+ * single-JSON-document-on-stdout contract.
+ */
+function readModelCacheEntries(): Dirent[] | null {
+  if (!existsSync(DEFAULT_MODEL_CACHE_DIR)) return null;
+  try {
+    return readdirSync(DEFAULT_MODEL_CACHE_DIR, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+}
+
 function findCachedModelInspection(model: string): CachedModelInspection {
   const invalid: string[] = [];
   if (model.startsWith("hf:")) {
     const filename = model.split("/").pop();
-    if (!filename || !existsSync(DEFAULT_MODEL_CACHE_DIR)) return { path: null, invalid };
-    const entries = readdirSync(DEFAULT_MODEL_CACHE_DIR, { withFileTypes: true });
+    if (!filename) return { path: null, invalid };
+    const entries = readModelCacheEntries();
+    if (!entries) return { path: null, invalid };
     for (const entry of entries) {
       // Only consider real `.gguf` blobs. `qmd pull` writes a `<filename>.etag`
       // HTTP sidecar next to each download; that name also satisfies
@@ -4727,12 +4857,14 @@ if (isMain) {
 
   const cli = parseCLI();
 
-  // Contract commands: status, --version, and the collection subcommands in
-  // CONTRACT_COLLECTION_SUBCOMMANDS. Arming on the command, not the format
-  // alone, keeps non-contract commands (e.g. `update`) unaffected by note().
+  // Contract commands: status, capabilities, --version, and the collection
+  // subcommands in CONTRACT_COLLECTION_SUBCOMMANDS. Arming on the command, not
+  // the format alone, keeps non-contract commands (e.g. `update`) unaffected by
+  // note().
   if (cli.opts.format === "json" && (
     cli.values.version
     || cli.command === "status"
+    || cli.command === "capabilities"
     || (cli.command === "collection" && CONTRACT_COLLECTION_SUBCOMMANDS.has(cli.args[0] ?? ""))
   )) {
     contractJsonMode = true;
@@ -5045,6 +5177,10 @@ if (isMain) {
 
     case "status":
       await showStatus(cli.opts.format);
+      break;
+
+    case "capabilities":
+      showCapabilities(cli.opts.format);
       break;
 
     case "doctor":

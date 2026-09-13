@@ -51,14 +51,15 @@ release if one is added.
 
 ## 4. Machine-readable CLI contract
 
-`qmd status`, `qmd --version`, `qmd collection list`, `qmd collection show`
-(alias `info`), and the six mutating `collection` subcommands (`add`,
-`remove`/`rm`, `rename`/`mv`, `update-cmd`/`set-update`, `include`,
-`exclude`) each emit a single parseable JSON document on stdout when passed
-`--format json`. Every payload carries a top-level `schemaVersion` integer,
-currently `1`; it changes only on a non-additive change to that payload's
-field set (a field removed, renamed, or retyped) — a field being added never
-bumps it. The exact field set of each payload is pinned by tests.
+`qmd status`, `qmd capabilities`, `qmd --version`, `qmd collection list`,
+`qmd collection show` (alias `info`), and the six mutating `collection`
+subcommands (`add`, `remove`/`rm`, `rename`/`mv`, `update-cmd`/`set-update`,
+`include`, `exclude`) each emit a single parseable JSON document on stdout
+when passed `--format json`. Every payload carries a top-level
+`schemaVersion` integer, currently `1`; it changes only on a non-additive
+change to that payload's field set (a field removed, renamed, or retyped) — a
+field being added never bumps it. The exact field set of each payload is
+pinned by tests.
 
 **Does not promise**: that the human-readable (default) text output is
 stable. Wording, column widths, colors, and ordering of the non-`--format

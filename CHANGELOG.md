@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `qmd capabilities` reports, for each of the three model roles (`embed`,
+  `rerank`, `generate`), the active model and whether it is usable right now —
+  and when it is not, which of four reasons applies: the model file is missing,
+  the cached file is not valid GGUF, a remote base URL is configured with no
+  API key, or the configured model names a remote model with no remote backend
+  behind it. Under `--format json` it emits a single machine-readable document
+  with a `schemaVersion`, alongside the other contract commands. It reads
+  config and the model cache only — never the index — so it answers in a fresh
+  install with no collections, and it never writes: unlike `qmd status`, it
+  leaves the config file untouched even when no `models:` block is stored, so
+  a consumer may poll it without mutating the user's configuration.
+
 ## [2.8.3-mate.6] - 2026-09-01
 
 ### Added
