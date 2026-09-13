@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-mate.7] - 2026-09-13
+
 ### Added
 
 - `qmd capabilities` reports, for each of the three model roles (`embed`,
